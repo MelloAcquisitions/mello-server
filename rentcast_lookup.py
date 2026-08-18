@@ -114,24 +114,46 @@ def _similarity_score(comp: dict, subject: dict) -> float:
     return max(score, 0.0)
 
 
+def _remove_price_outliers(comps_with_prices: list, k: float = 1.5) -> list:
+    """
+    Removes statistical outliers using the IQR method before they skew the
+    ARV calculation — e.g. one distressed/off-market sale at half the normal
+    price shouldn't drag the whole average down. Needs at least 4 comps to
+    compute meaningful quartiles; returns everything unchanged if fewer.
+    """
+    if len(comps_with_prices) < 4:
+        return comps_with_prices
+
+    sorted_prices = sorted(c["price"] for c in comps_with_prices)
+    n = len(sorted_prices)
+    q1 = sorted_prices[n // 4]
+    q3 = sorted_prices[(3 * n) // 4]
+    iqr = q3 - q1
+    lower_bound = q1 - k * iqr
+    upper_bound = q3 + k * iqr
+
+    return [c for c in comps_with_prices if lower_bound <= c["price"] <= upper_bound]
+
+
 def analyze_sold_comps(sold_comps: list, subject_property: dict = None) -> dict:
     """
     Richer version of a simple average — this is the part a human wouldn't
     have time to do live on a call, but an AI agent can compute instantly:
 
-    1. Similarity-weighted ARV (better matches count more than loose ones)
-    2. Median sold price (less sensitive to outliers than the mean)
-    3. Investor/LLC buyer activity — what % of recent sales nearby went to
+    1. Outlier removal (IQR method) — strips out abnormal sales before they
+       skew the number, e.g. a distressed or off-market sale priced well
+       below the rest of the market
+    2. Similarity-weighted ARV (better matches count more than loose ones)
+    3. Median sold price (less sensitive to outliers than the mean)
+    4. Investor/LLC buyer activity — what % of recent sales nearby went to
        an Organization (LLC, investor entity) rather than an Individual.
 
     subject_property: optional dict with squareFootage/yearBuilt/bedrooms/
     bathrooms for the property being evaluated, used for similarity scoring.
-    If omitted, falls back to a simple unweighted average.
 
-    IMPORTANT: only uses records with an actual lastSalePrice — does NOT
-    fall back to a listing's current "price" field, since that can be a
-    current asking price rather than what the property actually sold for,
-    which would quietly contaminate a "sold comps" analysis.
+    Only uses records with an actual lastSalePrice — no fallback to a
+    listing's current "price" field, since that can be an asking price
+    rather than what the property actually sold for.
     """
     if not sold_comps:
         return {
@@ -140,36 +162,49 @@ def analyze_sold_comps(sold_comps: list, subject_property: dict = None) -> dict:
             "median_sold_price": None,
             "average_price_per_sqft": None,
             "comp_count": 0,
+            "outliers_removed": 0,
             "investor_buyer_pct": None,
             "investor_buyer_count": 0,
         }
 
-    weighted_prices = []
-    weights = []
-    prices = []
-    price_per_sqft_list = []
+    # First pass: gather all comps that have a real sold price, keep the
+    # full comp dict attached so we can still weight/score them after filtering
+    priced_comps = []
     investor_count = 0
     known_owner_type_count = 0
 
     for comp in sold_comps:
-        price = comp.get("lastSalePrice")  # only real sold prices — no fallback to asking price
-        sqft = comp.get("squareFootage")
-
+        price = comp.get("lastSalePrice")
         if price:
-            prices.append(price)
-            if sqft:
-                price_per_sqft_list.append(price / sqft)
-
-            if subject_property:
-                weight = _similarity_score(comp, subject_property)
-                weighted_prices.append(price * weight)
-                weights.append(weight)
+            priced_comps.append({"comp": comp, "price": price})
 
         owner_type = comp.get("owner", {}).get("type") if isinstance(comp.get("owner"), dict) else None
         if owner_type:
             known_owner_type_count += 1
             if owner_type == "Organization":
                 investor_count += 1
+
+    filtered_comps = _remove_price_outliers(priced_comps)
+    outliers_removed = len(priced_comps) - len(filtered_comps)
+
+    weighted_prices = []
+    weights = []
+    prices = []
+    price_per_sqft_list = []
+
+    for item in filtered_comps:
+        comp = item["comp"]
+        price = item["price"]
+        sqft = comp.get("squareFootage")
+
+        prices.append(price)
+        if sqft:
+            price_per_sqft_list.append(price / sqft)
+
+        if subject_property:
+            weight = _similarity_score(comp, subject_property)
+            weighted_prices.append(price * weight)
+            weights.append(weight)
 
     weighted_arv = (
         round(sum(weighted_prices) / sum(weights)) if weights and sum(weights) > 0 else None
@@ -189,6 +224,7 @@ def analyze_sold_comps(sold_comps: list, subject_property: dict = None) -> dict:
         "median_sold_price": median_price,
         "average_price_per_sqft": avg_price_per_sqft,
         "comp_count": len(prices),
+        "outliers_removed": outliers_removed,
         "investor_buyer_pct": investor_pct,
         "investor_buyer_count": investor_count,
     }

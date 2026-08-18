@@ -95,29 +95,37 @@ def _airtable_headers():
     }
 
 
-def find_lead_by_address(address: str) -> Optional[str]:
-    """Returns the Airtable record ID for a lead matching this address, or None."""
+def find_lead_record(address: str) -> Optional[dict]:
+    """Returns the full Airtable record (id + fields) matching this address, or None."""
     params = {"filterByFormula": f"{{address}} = '{address}'"}
     response = requests.get(AIRTABLE_URL, headers=_airtable_headers(), params=params, timeout=15)
-    response.raise_for_status()
+    if not response.ok:
+        raise HTTPException(
+            status_code=response.status_code,
+            detail=f"Airtable error on lookup: {response.text}",
+        )
     records = response.json().get("records", [])
-    return records[0]["id"] if records else None
+    return records[0] if records else None
 
 
 def upsert_lead(address: str, fields: dict) -> dict:
     """Creates a new lead record, or updates the existing one for this address."""
-    existing_id = find_lead_by_address(address)
+    existing_record = find_lead_record(address)
     payload = {"fields": fields}
 
-    if existing_id:
+    if existing_record:
         response = requests.patch(
-            f"{AIRTABLE_URL}/{existing_id}", headers=_airtable_headers(), json=payload, timeout=15
+            f"{AIRTABLE_URL}/{existing_record['id']}", headers=_airtable_headers(), json=payload, timeout=15
         )
     else:
         payload["fields"]["address"] = address
         response = requests.post(AIRTABLE_URL, headers=_airtable_headers(), json=payload, timeout=15)
 
-    response.raise_for_status()
+    if not response.ok:
+        raise HTTPException(
+            status_code=response.status_code,
+            detail=f"Airtable error on write: {response.text}",
+        )
     return response.json()
 
 
@@ -191,11 +199,22 @@ def log_call_outcome(req: LogCallRequest):
     """
     Writes (or updates) the lead's record in Airtable. Called at the end of
     EVERY call, regardless of outcome — including opt-outs and rejections.
+
+    Automatically increments the #_calls column by 1 each time this fires,
+    since one call outcome logged = one call made.
+
+    NOTE: writes to an "offer_amount" field — this column must exist in
+    your Airtable table (currency type) or this will fail. If you haven't
+    added it yet, add it before testing this endpoint.
     """
+    existing_record = find_lead_record(req.address)
+    current_call_count = existing_record["fields"].get("#_calls", 0) if existing_record else 0
+
     fields = {
         "status": req.status,
         "call_transcript_summary": req.notes,
         "last_call_date": __import__("datetime").date.today().isoformat(),
+        "#_calls": current_call_count + 1,
     }
     if req.offer_amount is not None:
         fields["offer_amount"] = req.offer_amount
@@ -203,7 +222,7 @@ def log_call_outcome(req: LogCallRequest):
         fields["arv"] = req.arv
 
     result = upsert_lead(req.address, fields)
-    return {"success": True, "airtable_record": result.get("id")}
+    return {"success": True, "airtable_record": result.get("id"), "call_count": current_call_count + 1}
 
 
 @app.post("/flag_for_human_review")
