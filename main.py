@@ -70,7 +70,8 @@ class WholetailRequest(BaseModel):
 
 class LogCallRequest(BaseModel):
     address: str
-    status: str  # new | contacted | qualified | offer_made | agreed | rejected | opt_out | callback_requested
+    status: str  # Must exactly match your Airtable single-select options (case-sensitive):
+                 # New | Contacted | Qualified | Offer Made | Agreed | Rejected | Opt Out | Human Call
     notes: Optional[str] = ""
     offer_amount: Optional[float] = None
     arv: Optional[float] = None
@@ -236,7 +237,7 @@ def flag_for_human_review(req: FlagReviewRequest):
     to approve without holding up the call.
     """
     fields = {
-        "status": "agreed",
+        "status": "Agreed",
         "offer_amount": req.agreed_price,
         "call_transcript_summary": req.call_transcript_summary,
         "last_call_date": __import__("datetime").date.today().isoformat(),
