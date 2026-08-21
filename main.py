@@ -23,18 +23,21 @@ import os
 from typing import Optional
 
 import requests
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 
-from calculator import flip_mao, wholetail_calculator
+from calculator import flip_mao, wholetail_calculator, calculate_final_fee
 from rentcast_lookup import (
     get_sold_comps,
     get_property_valuation,
     analyze_sold_comps,
     get_recommended_arv,
 )
+from zillapi_lookup import get_zillow_valuation, extract_zestimate
+from dashboard import router as dashboard_router
 
 app = FastAPI(title="Mello Acquisitions Agent Tools")
+app.include_router(dashboard_router)
 
 AIRTABLE_API_KEY = os.environ.get("AIRTABLE_API_KEY")
 AIRTABLE_BASE_ID = os.environ.get("AIRTABLE_BASE_ID")
@@ -57,8 +60,15 @@ class PropertyAnalysisRequest(BaseModel):
 class MaoRequest(BaseModel):
     arv: float
     repair_cost: float
-    wholesale_fee: float = 10000
-    desired_profit: float = 0
+    wholesale_fee_min: float = 10000
+    buyer_profit_pct: float = 0.10
+
+
+class FinalFeeRequest(BaseModel):
+    arv: float
+    repair_cost: float
+    agreed_price: float
+    buyer_profit_pct: float = 0.10
 
 
 class WholetailRequest(BaseModel):
@@ -143,9 +153,9 @@ def health_check():
 @app.post("/get_property_analysis")
 def get_property_analysis(req: PropertyAnalysisRequest):
     """
-    The main research call. Pulls sold comps + AVM estimate, reconciles them,
-    and returns a conservative recommended ARV plus supporting data
-    (investor buyer activity, comp count, etc.) for the agent to use.
+    The main research call. Pulls sold comps + RentCast AVM + Zillow Zestimate,
+    reconciles all available sources, and returns a conservative recommended
+    ARV plus supporting data (investor buyer activity, comp count, etc.).
     """
     full_address = f"{req.address}, {req.city}, {req.state} {req.zip_code}"
 
@@ -156,12 +166,25 @@ def get_property_analysis(req: PropertyAnalysisRequest):
     sold_properties = sold_result if isinstance(sold_result, list) else sold_result.get("properties", [])
 
     analysis = analyze_sold_comps(sold_properties, subject_property=subject)
-    recommendation = get_recommended_arv(analysis, avm_result)
+
+    # Zillow is a genuinely independent third source — but it's a separate
+    # vendor with its own possible outages, so it must never take down the
+    # whole endpoint. If it fails, we just proceed with the two RentCast
+    # candidates, same as before Zillow existed.
+    zillow_estimate = None
+    try:
+        zillow_result = get_zillow_valuation(full_address)
+        zillow_estimate = extract_zestimate(zillow_result)
+    except Exception as e:
+        print(f"Zillow lookup failed, proceeding without it: {e}")
+
+    recommendation = get_recommended_arv(analysis, avm_result, zillow_estimate=zillow_estimate)
 
     return {
         "recommended_arv": recommendation["recommended_arv"],
         "source": recommendation["source"],
         "spread_pct": recommendation["spread_pct"],
+        "all_candidates": recommendation["all_candidates"],
         "comp_count": analysis["comp_count"],
         "investor_buyer_pct": analysis["investor_buyer_pct"],
         "subject_property": {
@@ -175,12 +198,30 @@ def get_property_analysis(req: PropertyAnalysisRequest):
 
 @app.post("/calculate_mao")
 def calculate_mao_endpoint(req: MaoRequest):
-    """Standard flip-deal MAO calculation — returns ceiling and opening offer."""
+    """Standard flip-deal MAO calculation — returns ceiling, opening offer,
+    and the scaled wholesale fee. Can return no_deal=True if the numbers
+    can't support the $10K minimum fee while protecting buyer margin."""
     return flip_mao(
         arv=req.arv,
         repair_cost=req.repair_cost,
-        wholesale_fee=req.wholesale_fee,
-        desired_profit=req.desired_profit,
+        wholesale_fee_min=req.wholesale_fee_min,
+        buyer_profit_pct=req.buyer_profit_pct,
+    )
+
+
+@app.post("/calculate_final_fee")
+def calculate_final_fee_endpoint(req: FinalFeeRequest):
+    """
+    Call this ONCE a real price has been agreed with the seller — not
+    during the initial offer. Your actual fee can be higher than the
+    minimum used to set the ceiling if you negotiated a lower price than
+    the max — that's expected and good, not something to cap.
+    """
+    return calculate_final_fee(
+        arv=req.arv,
+        repair_cost=req.repair_cost,
+        agreed_price=req.agreed_price,
+        buyer_profit_pct=req.buyer_profit_pct,
     )
 
 
@@ -226,7 +267,61 @@ def log_call_outcome(req: LogCallRequest):
     return {"success": True, "airtable_record": result.get("id"), "call_count": current_call_count + 1}
 
 
-@app.post("/flag_for_human_review")
+@app.post("/inbound_email")
+async def inbound_email(request: Request):
+    """
+    Mailgun calls this the moment a seller replies to an email, attachments
+    included. Extracts any image/video attachments and stores their URLs
+    directly on the matching lead's Airtable record.
+    """
+    form = await request.form()
+    sender_email = form.get("sender", "")
+    attachment_count = int(form.get("attachment-count", 0))
+
+    attachment_urls = []
+    for i in range(1, attachment_count + 1):
+        # Mailgun includes a direct URL for each attachment in the webhook payload
+        key = f"attachment-{i}"
+        if key in form:
+            file = form[key]
+            attachment_urls.append({"url": file.url if hasattr(file, "url") else str(file)})
+
+    # TODO: look up the lead by matching sender_email against an "email"
+    # field on the Leads table (needs adding — currently no email column),
+    # then append attachment_urls to an Airtable Attachment-type field.
+    print(f"Received {len(attachment_urls)} attachment(s) from {sender_email}")
+
+    return {"received": True, "attachment_count": len(attachment_urls)}
+
+
+@app.post("/inbound_sms")
+async def inbound_sms(request: Request):
+    """
+    Twilio calls this the moment a seller texts back, MMS photos included.
+    Extracts any media URLs and stores them directly on the matching lead's
+    Airtable record.
+    """
+    form = await request.form()
+    from_number = form.get("From", "")
+    num_media = int(form.get("NumMedia", 0))
+
+    media_urls = []
+    for i in range(num_media):
+        media_url = form.get(f"MediaUrl{i}")
+        if media_url:
+            media_urls.append({"url": media_url})
+
+    # TODO: look up the lead by matching from_number against the "phone"
+    # field already on your Leads table, then append media_urls to an
+    # Airtable Attachment-type field (add one if it doesn't exist yet —
+    # Airtable's Attachment field type accepts external URLs directly and
+    # will fetch/store the file itself, no separate upload step needed).
+    print(f"Received {len(media_urls)} MMS attachment(s) from {from_number}")
+
+    return {"received": True, "media_count": len(media_urls)}
+
+
+
 def flag_for_human_review(req: FlagReviewRequest):
     """
     Called ONLY when a seller verbally agrees to a price. Marks the lead as

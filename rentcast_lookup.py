@@ -230,26 +230,31 @@ def analyze_sold_comps(sold_comps: list, subject_property: dict = None) -> dict:
     }
 
 
-def get_recommended_arv(sold_comps_analysis: dict, avm_result: dict) -> dict:
+def get_recommended_arv(sold_comps_analysis: dict, avm_result: dict, zillow_estimate: float = None) -> dict:
     """
-    Reconciles the sold-comps analysis against the AVM estimate and picks
-    the CONSERVATIVE (lower) figure as the recommended ARV to feed into
-    calculate_mao(). Deliberately conservative for two reasons:
-      1. Protects your margin if either estimate is running optimistic
-      2. Protects your ability to actually resell — an end buyer will run
-         their own comps before agreeing to your price, and a conservative
-         ARV is more likely to survive that independent check
+    Reconciles up to THREE valuation estimates and picks the CONSERVATIVE
+    (lowest) one as the recommended ARV:
+      1. RentCast sold-comps weighted average (real closed transactions)
+      2. RentCast's own AVM estimate
+      3. Zillow's Zestimate, if provided — a genuinely independent model,
+         unlike #1 and #2 which both come from the same underlying provider
 
-    Fully automated — no human review gate here. This is a data reconciliation
-    step, not a binding commitment, so it always resolves to a number and lets
-    the call continue. spread_pct is still reported for your own visibility
-    when reviewing logs later, it just doesn't block anything live.
+    Deliberately conservative for two reasons: protects your margin if any
+    estimate runs optimistic, and protects your ability to actually resell —
+    an end buyer will run their own numbers before agreeing to your price.
+
+    zillow_estimate: pass in the result of extract_zestimate() from
+    zillapi_lookup.py. Optional — reconciliation still works with just the
+    two RentCast-derived candidates if this is omitted.
     """
     candidates = {
         "sold_comps_weighted": sold_comps_analysis.get("weighted_arv"),
         "sold_comps_median": sold_comps_analysis.get("median_sold_price"),
         "avm_estimate": avm_result.get("price"),
     }
+    if zillow_estimate:
+        candidates["zillow_zestimate"] = zillow_estimate
+
     valid_candidates = {k: v for k, v in candidates.items() if v}
 
     if not valid_candidates:

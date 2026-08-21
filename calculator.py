@@ -53,20 +53,92 @@ def flip_calculator(
 def flip_mao(
     arv: float,
     repair_cost: float,
-    wholesale_fee: float,
-    desired_profit: float = 0,
+    wholesale_fee_min: float = 10000,
+    buyer_profit_pct: float = 0.10,
     closing_cost_pct: float = 0.07,
     holding_cost_pct: float = 0.05,
-) -> float:
+) -> dict:
     """
-    Solves the flip calculator backwards: given a desired profit (0 = breakeven
-    floor), what's the maximum you can offer the seller?
+    Solves the flip calculator backwards, with two hard guardrails:
+
+    1. Wholesale fee floor: $10,000 minimum. If the deal can't support at
+       least this much AFTER protecting the end buyer's margin, it's not a
+       viable deal — return no_deal instead of a number that shortchanges
+       either side.
+    2. Buyer profit protection: reserves buyer_profit_pct of ARV (default
+       10%, a common flip/wholetail minimum) for the END BUYER before any
+       wholesale fee is taken. This was previously missing — the old
+       formula could theoretically leave the buyer with zero margin.
+
+    The wholesale fee itself is NOT fixed — it scales with how much room
+    the deal actually has. Bigger, better deals support a bigger fee,
+    capped only by what's left after the buyer's protected margin — no
+    hard ceiling, but never taken at the seller's or buyer's expense.
     """
     closing_costs = arv * closing_cost_pct
     holding_costs = arv * holding_cost_pct
     after_holding = arv - closing_costs - repair_cost - holding_costs
-    mao_to_seller = after_holding - wholesale_fee - desired_profit
-    return round(mao_to_seller)
+
+    buyer_profit_target = round(arv * buyer_profit_pct)
+    available_for_fee_and_seller = after_holding - buyer_profit_target
+
+    if available_for_fee_and_seller < wholesale_fee_min:
+        return {
+            "no_deal": True,
+            "reason": "Not enough spread to support the minimum wholesale fee while still protecting the end buyer's profit margin.",
+            "mao_floor": None,
+            "opening_offer": None,
+            "wholesale_fee": None,
+            "buyer_profit_target": buyer_profit_target,
+        }
+
+    # Fee scales at 5% of ARV, floored at $10K — calibrated against real
+    # examples: $60K ARV -> $10K (floor kicks in), $300K -> $15K, $400K ->
+    # $20K, scaling up naturally on bigger deals with no hard ceiling.
+    fee_from_arv_pct = arv * 0.05
+    wholesale_fee = round(max(wholesale_fee_min, min(fee_from_arv_pct, available_for_fee_and_seller)))
+
+    mao_floor = round(available_for_fee_and_seller - wholesale_fee)
+    opening_offer = round(mao_floor * 0.93)
+
+    return {
+        "no_deal": False,
+        "mao_floor": mao_floor,
+        "opening_offer": opening_offer,
+        "wholesale_fee": wholesale_fee,  # MINIMUM target fee — the real fee can be higher, see calculate_final_fee()
+        "buyer_profit_target": buyer_profit_target,
+        "contract_price_to_buyer_max": round(available_for_fee_and_seller),
+    }
+
+
+def calculate_final_fee(arv: float, repair_cost: float, agreed_price: float, buyer_profit_pct: float = 0.10,
+                          closing_cost_pct: float = 0.07, holding_cost_pct: float = 0.05) -> dict:
+    """
+    Call this AFTER a real price is negotiated with the seller — not during
+    the initial ceiling calculation. The wholesale_fee from flip_mao() is
+    only a MINIMUM target used to set the ceiling; your actual fee is
+    whatever's left between the buyer's price cap and what you actually
+    paid the seller. Negotiate a lower price than the ceiling, and you
+    keep the difference — that's the point, not something to cap away.
+
+    Example: a $200K ARV deal with a $146K ceiling (implying a $10K minimum
+    fee) where the seller actually agrees to $136K nets you a real $20K fee
+    — same deal, better negotiation, and the buyer's protected margin never
+    changes either way.
+    """
+    closing_costs = arv * closing_cost_pct
+    holding_costs = arv * holding_cost_pct
+    after_holding = arv - closing_costs - repair_cost - holding_costs
+    buyer_profit_target = round(arv * buyer_profit_pct)
+    contract_price_to_buyer_max = round(after_holding - buyer_profit_target)
+
+    actual_fee = contract_price_to_buyer_max - agreed_price
+
+    return {
+        "actual_fee": round(actual_fee),
+        "contract_price_to_buyer_max": contract_price_to_buyer_max,
+        "agreed_price": agreed_price,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -182,7 +254,7 @@ if __name__ == "__main__":
     print("  Expected from spreadsheet: profit=14000, profit_pct=0.0467, all_in=286000")
 
     print("\n=== FLIP MAO (backwards-solve, breakeven) ===")
-    mao = flip_mao(arv=300000, repair_cost=0, wholesale_fee=10000)
+    mao = flip_mao(arv=300000, repair_cost=0)
     print(f"  Max offer to seller at breakeven: {mao}")
 
     print("\n=== RENTAL CALCULATOR (should match your spreadsheet exactly) ===")
