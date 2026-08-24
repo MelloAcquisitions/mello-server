@@ -36,6 +36,7 @@ from rentcast_lookup import (
 )
 from zillapi_lookup import get_zillow_valuation, extract_zestimate
 from dashboard import router as dashboard_router
+from airtable_helpers import find_lead_record, upsert_lead, AirtableError
 
 app = FastAPI(title="Mello Acquisitions Agent Tools")
 app.include_router(dashboard_router)
@@ -100,10 +101,8 @@ class FlagReviewRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Airtable helpers
+# Airtable helpers — imported at the top of the file
 # ---------------------------------------------------------------------------
-
-from airtable_helpers import find_lead_record, upsert_lead, AirtableError
 
 
 # ---------------------------------------------------------------------------
