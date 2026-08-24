@@ -3,6 +3,7 @@
 from lead_sourcing import get_daily_leads, extract_lead_summary
 from airtable_helpers import upsert_lead, AirtableError
 from orchestrator_lib import enrich_lead_with_valuation
+from datetime import datetime
 
 if __name__ == "__main__":
     print("Sourcing new leads and enriching data...")
@@ -25,6 +26,7 @@ if __name__ == "__main__":
                 "status": "New",
                 "arv": valuation["recommended_arv"],
                 "state": lead["state"],
+                "date_created": datetime.now().date().isoformat(),
             }
             upsert_lead(full_address, fields)
             print(f"  Saved to Airtable: {full_address} — ARV: {valuation['recommended_arv']}")

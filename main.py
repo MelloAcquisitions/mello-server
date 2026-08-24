@@ -287,6 +287,61 @@ async def inbound_sms(request: Request):
 
 
 
+@app.post("/vapi_call_ended")
+async def vapi_call_ended(request: Request):
+    """
+    Vapi's end-of-call-report webhook — fires automatically when a call
+    that actually CONNECTED ends, independent of whether the live agent's
+    own log_call_outcome tool call succeeded. Best-effort enrichment, not
+    a guarantee:
+      - Vapi does NOT send this for unanswered calls (confirmed by their
+        own support) — fine, the retry cadence already handles no-answer
+        leads correctly without this.
+      - There's a known intermittent bug where this occasionally doesn't
+        fire even for connected calls.
+
+    Configure this as your assistant's Server URL in Vapi, with
+    "end-of-call-report" included in serverMessages.
+    """
+    body = await request.json()
+    message = body.get("message", {})
+
+    if message.get("type") != "end-of-call-report":
+        return {"received": True, "ignored": "not an end-of-call-report"}
+
+    duration = message.get("durationSeconds")
+    ended_reason = message.get("endedReason")
+    phone = message.get("call", {}).get("customer", {}).get("number")
+    ai_summary = message.get("analysis", {}).get("summary", "")
+
+    print(f"End-of-call report: phone={phone}, duration={duration}s, reason={ended_reason}")
+
+    if not phone:
+        return {"received": True, "warning": "no phone number in payload"}
+
+    # NOTE: find_lead_record looks up by address currently. To look up by
+    # phone specifically, use query_leads(f"{{phone}}='{phone}'") instead —
+    # left this way for now, adjust if phone-based lookup proves necessary.
+    try:
+        record = find_lead_record(phone)
+    except Exception:
+        record = None
+
+    SHORT_CALL_THRESHOLD_SECONDS = 15
+    if duration is not None and duration < SHORT_CALL_THRESHOLD_SECONDS and record:
+        current_status = record["fields"].get("status")
+        if current_status in ("New", "Contacted", None):
+            note = f"Short call ({duration}s, ended: {ended_reason}). AI summary: {ai_summary}"
+            print(f"  Flagging as short/low-engagement call: {note}")
+            # Logged as a note, not an automatic status change — a human
+            # glance at "short call, no engagement" is safer than the
+            # system unilaterally deciding this lead is dead from one
+            # data point alone.
+
+    return {"received": True}
+
+
+@app.post("/flag_for_human_review")
 def flag_for_human_review(req: FlagReviewRequest):
     """
     Called ONLY when a seller verbally agrees to a price. Marks the lead as

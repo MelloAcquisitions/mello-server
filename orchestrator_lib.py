@@ -6,7 +6,7 @@ not duplicated six times.
 """
 
 import os
-from datetime import datetime
+from datetime import datetime, date
 from zoneinfo import ZoneInfo
 
 import requests
@@ -20,6 +20,39 @@ VAPI_API_KEY = os.environ.get("VAPI_API_KEY")
 
 MAX_CALLS_PER_DISPATCH_RUN = 3  # throttle per run — simple, honest concurrency
                                  # control rather than real-time tracking
+
+
+# ---------------------------------------------------------------------------
+# Retry cadence — a decaying schedule instead of a flat attempt cap.
+# Cumulative schedule: index = attempt number (0-indexed), value = earliest
+# day-offset from lead creation that attempt is allowed. Attempts 1-2 same
+# day, then day 2, then roughly weekly through day 30 — after that, or after
+# MAX_ATTEMPTS total, the lead is Exhausted regardless of days elapsed.
+# ---------------------------------------------------------------------------
+
+CALL_SCHEDULE_DAYS = [0, 0, 2, 9, 16, 23, 30]
+MAX_ATTEMPTS = len(CALL_SCHEDULE_DAYS)
+
+
+def is_lead_exhausted(date_created: str, call_count: int) -> bool:
+    """True if this lead has used up its full retry schedule — either hit
+    the attempt cap, or run past the final cutoff day."""
+    if call_count >= MAX_ATTEMPTS:
+        return True
+    created = date.fromisoformat(date_created)
+    days_elapsed = (date.today() - created).days
+    return days_elapsed > CALL_SCHEDULE_DAYS[-1]
+
+
+def is_retry_due(date_created: str, call_count: int) -> bool:
+    """True if enough time has passed since lead creation to allow the
+    NEXT attempt (call_count is how many attempts have happened so far)."""
+    if is_lead_exhausted(date_created, call_count):
+        return False  # never due if already exhausted, regardless of schedule index
+    created = date.fromisoformat(date_created)
+    days_elapsed = (date.today() - created).days
+    earliest_allowed = CALL_SCHEDULE_DAYS[call_count]
+    return days_elapsed >= earliest_allowed
 
 
 def enrich_lead_with_valuation(address: str, city: str, state: str, zip_code: str) -> dict:
