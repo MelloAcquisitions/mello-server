@@ -21,6 +21,7 @@ from datetime import datetime
 from apscheduler.schedulers.blocking import BlockingScheduler
 
 from lead_sourcing import get_daily_leads, extract_lead_summary
+from airtable_helpers import upsert_lead, query_leads, AirtableError
 from rentcast_lookup import (
     get_sold_comps, get_property_valuation, analyze_sold_comps, get_recommended_arv
 )
@@ -79,13 +80,27 @@ def morning_lead_prep():
     new_leads = extract_lead_summary(raw_leads)
 
     for lead in new_leads:
-        if not lead.get("address"):
+        full_address = lead.get("address")
+        if not full_address:
             continue
-        valuation = enrich_lead_with_valuation(
-            lead["address"], lead["city"], lead["state"], lead["zip"]
-        )
-        # TODO: write lead + valuation into Airtable as a new "New" status record
-        print(f"  Enriched: {lead['address']} — recommended ARV: {valuation['recommended_arv']}")
+
+        try:
+            valuation = enrich_lead_with_valuation(
+                full_address, lead["city"], lead["state"], lead["zip"]
+            )
+            fields = {
+                "owner_name": lead.get("owner_name", ""),
+                "phone": lead.get("phone", ""),
+                "source": lead.get("source", ""),
+                "status": "New",
+                "arv": valuation["recommended_arv"],
+                "state": lead["state"],  # used later for timezone-aware dispatch
+            }
+            upsert_lead(full_address, fields)
+            print(f"  Saved to Airtable: {full_address} — ARV: {valuation['recommended_arv']}")
+        except (AirtableError, Exception) as e:
+            print(f"  FAILED to process {full_address}: {e}")
+            continue
 
 
 @scheduler.scheduled_job("interval", minutes=30, start_date=f"{datetime.now().date()} 07:30:00")
@@ -93,19 +108,83 @@ def continuous_enrichment():
     """Re-checks for leads still missing valuation data throughout the day —
     covers leads added mid-day or where the morning pull failed."""
     print(f"[{datetime.now()}] Running periodic enrichment check...")
-    # TODO: query Airtable for leads with status=New and no arv value yet,
-    # run enrich_lead_with_valuation() on each
+
+    unenriched = query_leads("AND({status}='New', {arv}=BLANK())")
+    print(f"  Found {len(unenriched)} leads needing enrichment")
+
+    for record in unenriched:
+        fields = record["fields"]
+        address = fields.get("address")
+        if not address:
+            continue
+        # address is stored as one combined string — this assumes city/state/zip
+        # were captured separately at intake; adjust if your lead source stores
+        # them differently.
+        try:
+            valuation = enrich_lead_with_valuation(
+                address, fields.get("city", ""), fields.get("state", ""), fields.get("zip", "")
+            )
+            upsert_lead(address, {"arv": valuation["recommended_arv"]})
+            print(f"  Enriched: {address} — ARV: {valuation['recommended_arv']}")
+        except Exception as e:
+            print(f"  FAILED to enrich {address}: {e}")
+            continue
 
 
 # ---------------------------------------------------------------------------
 # 8:00 AM - 9:00 PM — calling window
 # ---------------------------------------------------------------------------
 
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+# Predominant timezone per US state. A few large states genuinely span two
+# zones (TX, FL, etc.) — this uses each state's majority-population zone as
+# a reasonable approximation. A more precise version would look up by city/
+# zip instead of state, worth upgrading to once you have real call volume
+# and want to be exact about border-zone leads.
+STATE_TIMEZONES = {
+    "AL": "America/Chicago", "AK": "America/Anchorage", "AZ": "America/Phoenix",
+    "AR": "America/Chicago", "CA": "America/Los_Angeles", "CO": "America/Denver",
+    "CT": "America/New_York", "DE": "America/New_York", "FL": "America/New_York",
+    "GA": "America/New_York", "HI": "Pacific/Honolulu", "ID": "America/Boise",
+    "IL": "America/Chicago", "IN": "America/Indiana/Indianapolis", "IA": "America/Chicago",
+    "KS": "America/Chicago", "KY": "America/New_York", "LA": "America/Chicago",
+    "ME": "America/New_York", "MD": "America/New_York", "MA": "America/New_York",
+    "MI": "America/Detroit", "MN": "America/Chicago", "MS": "America/Chicago",
+    "MO": "America/Chicago", "MT": "America/Denver", "NE": "America/Chicago",
+    "NV": "America/Los_Angeles", "NH": "America/New_York", "NJ": "America/New_York",
+    "NM": "America/Denver", "NY": "America/New_York", "NC": "America/New_York",
+    "ND": "America/North_Dakota/Center", "OH": "America/New_York", "OK": "America/Chicago",
+    "OR": "America/Los_Angeles", "PA": "America/New_York", "RI": "America/New_York",
+    "SC": "America/New_York", "SD": "America/Chicago", "TN": "America/Chicago",
+    "TX": "America/Chicago", "UT": "America/Denver", "VT": "America/New_York",
+    "VA": "America/New_York", "WA": "America/Los_Angeles", "WV": "America/New_York",
+    "WI": "America/Chicago", "WY": "America/Denver", "DC": "America/New_York",
+}
+
+
 def get_lead_local_hour(state: str) -> int:
-    """TODO: map state -> timezone (e.g. via a state-to-tz lookup dict or
-    the `pytz`/`zoneinfo` library) and return the CURRENT local hour for
-    that lead. Calls must only dispatch when this falls within 8-21."""
-    raise NotImplementedError("Timezone mapping not yet built")
+    """
+    Returns the current hour (0-23) in the lead's local timezone, based on
+    their state. Calls must only dispatch when this falls within legal
+    calling hours (8am-9pm in the LEAD's timezone, not yours — a real TCPA
+    requirement, not a suggestion).
+    """
+    tz_name = STATE_TIMEZONES.get(state.upper())
+    if not tz_name:
+        raise ValueError(f"Unknown state code: {state}. Cannot determine calling window safely.")
+    local_time = datetime.now(ZoneInfo(tz_name))
+    return local_time.hour
+
+
+def is_within_calling_hours(state: str, start_hour: int = 8, end_hour: int = 21) -> bool:
+    """True if it's currently within legal calling hours in the lead's timezone."""
+    try:
+        current_hour = get_lead_local_hour(state)
+    except ValueError:
+        return False  # unknown state — fail safe, don't call
+    return start_hour <= current_hour < end_hour
 
 
 def trigger_vapi_call(phone_number: str, lead_context: dict):
@@ -140,15 +219,51 @@ def trigger_vapi_call(phone_number: str, lead_context: dict):
     return response.json()
 
 
+MAX_CALLS_PER_DISPATCH_RUN = 3  # throttle per run — simple, honest concurrency
+                                 # control rather than real-time tracking, since
+                                 # this job runs every 15 min anyway
+
+
 @scheduler.scheduled_job("interval", minutes=15, start_date=f"{datetime.now().date()} 08:00:00",
                           end_date=f"{datetime.now().date()} 21:00:00")
 def dispatch_calls():
     print(f"[{datetime.now()}] Checking for leads ready to call...")
-    # TODO: query Airtable for status=New leads with valuation data already
-    # populated, filter to only those within their LOCAL calling hours
-    # (get_lead_local_hour), respect a concurrency cap (e.g. max 3 active
-    # calls at once), then trigger_vapi_call() for each ready lead
-    pass
+
+    ready_leads = query_leads("AND({status}='New', {arv}!=BLANK())")
+    print(f"  Found {len(ready_leads)} enriched leads with status New")
+
+    calls_made = 0
+    for record in ready_leads:
+        if calls_made >= MAX_CALLS_PER_DISPATCH_RUN:
+            print(f"  Reached batch limit ({MAX_CALLS_PER_DISPATCH_RUN}) for this run — remaining leads wait for next cycle")
+            break
+
+        fields = record["fields"]
+        address = fields.get("address")
+        state = fields.get("state")
+        phone = fields.get("phone")
+
+        if not (address and state and phone):
+            print(f"  Skipping incomplete record: {address}")
+            continue
+
+        if not is_within_calling_hours(state):
+            print(f"  Skipping {address} — outside calling hours in {state} right now")
+            continue
+
+        try:
+            call_context = {
+                "seller_name": fields.get("owner_name", "there"),
+                "property_address": address,
+                "recommended_arv": str(fields.get("arv")),
+            }
+            result = trigger_vapi_call(phone, call_context)
+            upsert_lead(address, {"status": "Contacted"})
+            print(f"  Called {address} — Vapi call ID: {result.get('id')}")
+            calls_made += 1
+        except Exception as e:
+            print(f"  FAILED to call {address}: {e}")
+            continue
 
 
 def send_sms(phone_number: str, message: str):

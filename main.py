@@ -24,6 +24,7 @@ from typing import Optional
 
 import requests
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from calculator import flip_mao, wholetail_calculator, calculate_final_fee
@@ -38,6 +39,11 @@ from dashboard import router as dashboard_router
 
 app = FastAPI(title="Mello Acquisitions Agent Tools")
 app.include_router(dashboard_router)
+
+
+@app.exception_handler(AirtableError)
+async def airtable_error_handler(request: Request, exc: AirtableError):
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
 AIRTABLE_API_KEY = os.environ.get("AIRTABLE_API_KEY")
 AIRTABLE_BASE_ID = os.environ.get("AIRTABLE_BASE_ID")
@@ -97,47 +103,7 @@ class FlagReviewRequest(BaseModel):
 # Airtable helpers
 # ---------------------------------------------------------------------------
 
-def _airtable_headers():
-    if not AIRTABLE_API_KEY:
-        raise HTTPException(500, "AIRTABLE_API_KEY not set on the server")
-    return {
-        "Authorization": f"Bearer {AIRTABLE_API_KEY}",
-        "Content-Type": "application/json",
-    }
-
-
-def find_lead_record(address: str) -> Optional[dict]:
-    """Returns the full Airtable record (id + fields) matching this address, or None."""
-    params = {"filterByFormula": f"{{address}} = '{address}'"}
-    response = requests.get(AIRTABLE_URL, headers=_airtable_headers(), params=params, timeout=15)
-    if not response.ok:
-        raise HTTPException(
-            status_code=response.status_code,
-            detail=f"Airtable error on lookup: {response.text}",
-        )
-    records = response.json().get("records", [])
-    return records[0] if records else None
-
-
-def upsert_lead(address: str, fields: dict) -> dict:
-    """Creates a new lead record, or updates the existing one for this address."""
-    existing_record = find_lead_record(address)
-    payload = {"fields": fields}
-
-    if existing_record:
-        response = requests.patch(
-            f"{AIRTABLE_URL}/{existing_record['id']}", headers=_airtable_headers(), json=payload, timeout=15
-        )
-    else:
-        payload["fields"]["address"] = address
-        response = requests.post(AIRTABLE_URL, headers=_airtable_headers(), json=payload, timeout=15)
-
-    if not response.ok:
-        raise HTTPException(
-            status_code=response.status_code,
-            detail=f"Airtable error on write: {response.text}",
-        )
-    return response.json()
+from airtable_helpers import find_lead_record, upsert_lead, AirtableError
 
 
 # ---------------------------------------------------------------------------
