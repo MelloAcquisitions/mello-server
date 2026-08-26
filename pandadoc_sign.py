@@ -138,9 +138,9 @@ if __name__ == "__main__":
     contract_path = generate_contract(test_deal, "test_pandadoc_contract.docx")
     result = send_contract_for_signature(
         contract_path,
-        assignor_email="your-own-email@example.com",  # replace with YOUR real email to test safely
+        assignor_email="rodrigo.lozhdz@gmail.com",  # replace with YOUR real email to test safely
         assignor_name="Jane Smith",
-        assignee_email="your-business-email@example.com",  # replace with your real business email
+        assignee_email="mello.acquisitions@gmail.com",  # replace with your real business email
         assignee_name="Mello Acquisitions LLC",
     )
     print("Final result:")
