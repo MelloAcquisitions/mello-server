@@ -35,15 +35,17 @@ def get_daily_leads(
 
     quick_lists: which BatchData quicklist filters to stack. Defaults to the
     three highest-motivation indicators — combining them targets owners who
-    check multiple distress boxes at once, not just one.
-      - absenteeOwner: owner doesn't live at the property
-      - taxDefault: behind on property taxes
-      - highEquity: owns significantly more than they owe
+    check multiple distress boxes at once, not just one. Values confirmed
+    against BatchData's own docs — kebab-case, not camelCase (a real bug
+    fixed here after a live test caught it):
+      - absentee-owner: owner doesn't live at the property
+      - tax-default: behind on property taxes
+      - high-equity: owns significantly more than they owe
 
     limit: how many leads to pull (matches your ~10-15/day target)
     """
     if quick_lists is None:
-        quick_lists = ["absenteeOwner", "taxDefault", "highEquity"]
+        quick_lists = ["absentee-owner", "tax-default", "high-equity"]
 
     if not BATCHDATA_API_KEY:
         raise RuntimeError("BATCHDATA_API_KEY environment variable is not set.")

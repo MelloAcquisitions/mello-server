@@ -147,8 +147,8 @@ if __name__ == "__main__":
     contract_path = generate_contract(test_deal, "test_box_contract.docx")
     result = send_contract_for_signature(
         contract_path,
-        seller_email="your-own-email@example.com",       # replace with YOUR real email to test safely
-        buyer_email="your-business-email@example.com",   # replace with your real business email
+        seller_email="rodrigo.lozhdz@gmail.com",       # replace with YOUR real email to test safely
+        buyer_email="mello.acquisitions@gmail.com",   # replace with your real business email
     )
     print("Full result:")
     print(result)
