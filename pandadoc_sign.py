@@ -83,9 +83,9 @@ def create_document_from_template(deal: dict, seller_email: str, seller_name: st
         "template_uuid": PANDADOC_TEMPLATE_UUID,
         "recipients": [
             {"email": seller_email, "first_name": first_s,
-             "last_name": last_s[0] if last_s else "", "role": "Seller"},
+             "last_name": last_s[0] if last_s else "", "role": "Client"},
             {"email": BUYER_EMAIL, "first_name": first_b,
-             "last_name": last_b[0] if last_b else "", "role": "Buyer"},
+             "last_name": last_b[0] if last_b else "", "role": "Mello Acquisitions"},
         ],
         "fields": fields,
     }
