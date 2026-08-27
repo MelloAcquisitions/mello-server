@@ -36,22 +36,19 @@ def _headers():
     return {"Authorization": f"API-Key {PANDADOC_API_KEY}"}
 
 
-def create_document_from_template(deal: dict, seller_email: str, seller_name: str,
-                                    access_method: int = None) -> str:
+def create_document_from_template(deal: dict, seller_email: str, seller_name: str) -> str:
     """
     deal: dict with contract_date, seller_name, buyer_name, subject_property,
     legal_description, purchase_price, acceptance_deadline, closing_date,
     title_company, other_agreements, governing_state, seller_phone, buyer_phone
 
-    access_method: 1, 2, or 3 — which of the three PICTURES & ACCESS checkbox
-    options applies to this deal (lockbox / key / scheduled walkthrough,
-    matching whatever your three real options are). Leave None if not yet
-    captured — all three checkboxes stay unchecked, safer than guessing wrong.
-    This isn't captured anywhere else in the system yet — worth adding to
-    the live call flow or human review step so this has a real answer.
+    The three PICTURES & ACCESS checkboxes are intentionally left blank —
+    the seller decides and checks the applicable one themselves during
+    their own signing session, not something we set via API.
 
-    Only text/checkbox fields need values here — signature and date-of-
-    signing fields are filled by each person as they actually sign, not by us.
+    Only text fields need values here — signature, date-of-signing, and
+    checkbox fields are filled by each person as they actually interact
+    with the document, not by us.
     """
     if not PANDADOC_TEMPLATE_UUID:
         raise RuntimeError("PANDADOC_TEMPLATE_UUID not set")
@@ -70,9 +67,6 @@ def create_document_from_template(deal: dict, seller_email: str, seller_name: st
         "STATE OF": {"value": deal["governing_state"]},
         "SELLER PHONE NUMBER": {"value": deal["seller_phone"]},
         "BUYER PHONE NUMBER": {"value": deal["buyer_phone"]},
-        "CHECK BOX 1": {"value": access_method == 1},
-        "CHECK BOX 2": {"value": access_method == 2},
-        "CHECK BOX 3": {"value": access_method == 3},
     }
 
     first_s, *last_s = seller_name.split(" ", 1)
@@ -124,10 +118,9 @@ def send_document(document_id: str, message: str = "Please review and sign.") ->
     response.raise_for_status()
 
 
-def send_contract_for_signature(deal: dict, seller_email: str, seller_name: str,
-                                  access_method: int = None) -> dict:
+def send_contract_for_signature(deal: dict, seller_email: str, seller_name: str) -> dict:
     """The full flow in one call — what you'd use in your real deal pipeline."""
-    document_id = create_document_from_template(deal, seller_email, seller_name, access_method)
+    document_id = create_document_from_template(deal, seller_email, seller_name)
     result = send_document(document_id)
     print(f"Sent for signature: {document_id}")
     return result
@@ -154,7 +147,6 @@ if __name__ == "__main__":
         test_deal,
         seller_email="your-own-email@example.com",  # replace with YOUR real email to test safely
         seller_name="Jane Smith",
-        access_method=1,
     )
     print("Final result:")
     print(result)
