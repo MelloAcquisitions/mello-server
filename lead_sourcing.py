@@ -25,25 +25,39 @@ BASE_URL = "https://api.batchdata.com/api/v1/property/search"
 
 
 def get_daily_leads(
-    city: str,
-    state: str,
+    markets: list = None,
+    city: str = None,
+    state: str = None,
     quick_lists: list = None,
     limit: int = 15,
 ) -> dict:
     """
     Pulls a stacked distressed-owner list with contact info included.
 
-    quick_lists: which BatchData quicklist filters to stack. Defaults to the
-    three highest-motivation indicators — combining them targets owners who
-    check multiple distress boxes at once, not just one. Values confirmed
-    against BatchData's own docs — kebab-case, not camelCase (a real bug
-    fixed here after a live test caught it):
+    markets: list of {"city": ..., "state": ...} dicts — your specific
+    target zones, so leads stay concentrated where you actually have buyer
+    demand instead of landing in random dead zones nationwide. Example:
+        [{"city": "Austin", "state": "TX"}, {"city": "San Antonio", "state": "TX"}]
+    If provided, this takes priority over the single city/state args below.
+
+    city, state: single-market shorthand, kept for backwards compatibility —
+    equivalent to markets=[{"city": city, "state": state}].
+
+    quick_lists: which BatchData quicklist filters to stack. Values
+    confirmed against BatchData's own docs — kebab-case, not camelCase:
       - absentee-owner: owner doesn't live at the property
       - tax-default: behind on property taxes
       - high-equity: owns significantly more than they owe
 
-    limit: how many leads to pull (matches your ~10-15/day target)
+    limit: how many leads to pull PER MARKET (matches your ~10-15/day target
+    per zone — if you list 3 markets, expect roughly 3x this many total)
     """
+    if markets is None:
+        if city and state:
+            markets = [{"city": city, "state": state}]
+        else:
+            raise ValueError("Provide either markets=[...] or both city and state")
+
     if quick_lists is None:
         quick_lists = ["absentee-owner", "tax-default", "high-equity"]
 
@@ -55,30 +69,40 @@ def get_daily_leads(
         "Content-Type": "application/json",
     }
 
-    payload = {
-        "searchCriteria": {
-            "quickLists": quick_lists,
-            "general": {
-                # city/state filtering — adjust field names if BatchData's
-                # actual schema differs; verify against a live test call
+    all_properties = []
+    for market in markets:
+        payload = {
+            "searchCriteria": {
+                "quickLists": quick_lists,
+                # Nested {"equals": ...} structure — confirmed against
+                # BatchData's own documented searchCriteria schema. The
+                # earlier flat "city"/"state" keys were silently ignored,
+                # which is why leads came back scattered nationwide instead
+                # of confined to the target market.
+                "address": {
+                    "city": {"equals": market["city"]},
+                    "state": {"equals": market["state"]},
+                },
             },
-        },
-        "options": {
-            "take": limit,
-            "skip": 0,
-            "skipTrace": True,  # pulls phone numbers in the SAME call
-        },
-    }
-    # City/state go in searchCriteria per BatchData's address-based filtering
-    payload["searchCriteria"]["city"] = city
-    payload["searchCriteria"]["state"] = state
+            "options": {
+                "take": limit,
+                "skip": 0,
+                "skipTrace": True,  # pulls phone numbers in the SAME call
+            },
+        }
 
-    response = requests.post(BASE_URL, headers=headers, json=payload, timeout=30)
-    if not response.ok:
-        print(f"BatchData returned an error ({response.status_code}):")
-        print(response.text)
-    response.raise_for_status()
-    return response.json()
+        response = requests.post(BASE_URL, headers=headers, json=payload, timeout=30)
+        if not response.ok:
+            print(f"BatchData returned an error for {market} ({response.status_code}):")
+            print(response.text)
+        response.raise_for_status()
+
+        result = response.json()
+        properties = result.get("results", {}).get("properties", [])
+        print(f"  {market['city']}, {market['state']}: {len(properties)} properties found")
+        all_properties.extend(properties)
+
+    return {"results": {"properties": all_properties}}
 
 
 def extract_lead_summary(raw_result: dict) -> list:

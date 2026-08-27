@@ -3,11 +3,18 @@
 from lead_sourcing import get_daily_leads, extract_lead_summary
 from airtable_helpers import upsert_lead, AirtableError
 from orchestrator_lib import enrich_lead_with_valuation
-from datetime import datetime
+
+# Your specific target zones — add/remove markets here to focus on places
+# with real investor demand instead of landing in dead zones nationwide.
+TARGET_MARKETS = [
+    {"city": "Austin", "state": "TX"},
+    # {"city": "San Antonio", "state": "TX"},
+    # {"city": "Dallas", "state": "TX"},
+]
 
 if __name__ == "__main__":
     print("Sourcing new leads and enriching data...")
-    raw_leads = get_daily_leads(city="Austin", state="TX", limit=15)  # adjust market
+    raw_leads = get_daily_leads(markets=TARGET_MARKETS, limit=15)
     new_leads = extract_lead_summary(raw_leads)
 
     for lead in new_leads:
@@ -26,7 +33,9 @@ if __name__ == "__main__":
                 "status": "New",
                 "arv": valuation["recommended_arv"],
                 "state": lead["state"],
-                "date_created": datetime.now().date().isoformat(),
+                # date_created intentionally NOT set here — it's a computed
+                # "Created time" field in Airtable that auto-populates
+                # itself; writing to it manually causes a 422 error.
             }
             upsert_lead(full_address, fields)
             print(f"  Saved to Airtable: {full_address} — ARV: {valuation['recommended_arv']}")
