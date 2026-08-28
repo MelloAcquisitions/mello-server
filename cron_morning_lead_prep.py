@@ -1,6 +1,6 @@
 """Render Cron Job: runs once at 7:30 AM. Schedule in Render: 30 7 * * *"""
 
-from lead_sourcing import get_daily_leads, extract_lead_summary
+from lead_sourcing import get_compliant_leads
 from airtable_helpers import upsert_lead, AirtableError
 from orchestrator_lib import enrich_lead_with_valuation
 
@@ -21,8 +21,8 @@ MAX_ARV = 650000
 
 if __name__ == "__main__":
     print("Sourcing new leads and enriching data...")
-    raw_leads = get_daily_leads(markets=TARGET_MARKETS, limit=15)
-    new_leads = extract_lead_summary(raw_leads)
+    raw_leads = get_compliant_leads(markets=TARGET_MARKETS, target_count=15)
+    new_leads = raw_leads
 
     for lead in new_leads:
         full_address = lead.get("address")

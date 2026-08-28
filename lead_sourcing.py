@@ -30,6 +30,7 @@ def get_daily_leads(
     state: str = None,
     quick_lists: list = None,
     limit: int = 15,
+    skip: int = 0,
 ) -> dict:
     """
     Pulls a stacked distressed-owner list with contact info included.
@@ -49,8 +50,9 @@ def get_daily_leads(
       - tax-default: behind on property taxes
       - high-equity: owns significantly more than they owe
 
-    limit: how many leads to pull PER MARKET (matches your ~10-15/day target
-    per zone — if you list 3 markets, expect roughly 3x this many total)
+    limit: how many leads to pull PER MARKET per page
+    skip: pagination offset — used by get_compliant_leads() below to fetch
+    additional pages when earlier ones don't yield enough compliant leads
     """
     if markets is None:
         if city and state:
@@ -86,7 +88,7 @@ def get_daily_leads(
             },
             "options": {
                 "take": limit,
-                "skip": 0,
+                "skip": skip,
                 "skipTrace": True,  # pulls phone numbers in the SAME call
             },
         }
@@ -149,6 +151,37 @@ def extract_lead_summary(raw_result: dict) -> list:
         })
 
     return leads
+
+
+def get_compliant_leads(markets: list, target_count: int = 15, quick_lists: list = None,
+                          page_size: int = 20, max_pages: int = 4) -> list:
+    """
+    Keeps fetching additional pages from BatchData until it has actually
+    gathered target_count COMPLIANT leads (post DNC/litigator/reachability
+    filtering) — not just target_count raw properties. Roughly 30-40% of
+    raw results typically get filtered out, so a single fixed-size request
+    reliably falls short of what you actually wanted.
+
+    max_pages caps the worst case cost/runtime if a market genuinely has
+    few compliant leads available — after this many pages, returns
+    whatever was found rather than fetching indefinitely.
+    """
+    compliant_leads = []
+    skip = 0
+
+    for page in range(max_pages):
+        if len(compliant_leads) >= target_count:
+            break
+
+        raw = get_daily_leads(markets=markets, quick_lists=quick_lists, limit=page_size, skip=skip)
+        new_leads = extract_lead_summary(raw)
+        compliant_leads.extend(new_leads)
+        print(f"  Page {page + 1}: {len(new_leads)} compliant leads this page, "
+              f"{len(compliant_leads)}/{target_count} total so far")
+
+        skip += page_size
+
+    return compliant_leads[:target_count]
 
 
 if __name__ == "__main__":
