@@ -79,7 +79,7 @@ def draft_proposal(calls_with_outcomes: list) -> dict:
         for c in calls_with_outcomes[:10]  # cap to avoid huge prompts
     )
     message = client.messages.create(
-        model="claude-sonnet-4-6",
+        model="claude-sonnet-5",
         max_tokens=1000,
         messages=[{
             "role": "user",

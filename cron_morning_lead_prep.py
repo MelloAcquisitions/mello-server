@@ -33,7 +33,12 @@ if __name__ == "__main__":
             valuation = enrich_lead_with_valuation(
                 full_address, lead["city"], lead["state"], lead["zip"]
             )
-            arv = valuation["recommended_arv"]
+            arv = valuation.get("recommended_arv")
+
+            if arv is None:
+                print(f"  Skipping {full_address} — RentCast/Zillow returned no usable ARV "
+                      f"(no comps, no AVM, no Zestimate)")
+                continue
 
             if not (MIN_ARV <= arv <= MAX_ARV):
                 print(f"  Skipping {full_address} — ARV ${arv:,} outside target range "

@@ -46,4 +46,5 @@ if __name__ == "__main__":
 
     path = generate_contract(test_deal)
     print(f"Contract generated: {path}")
-    print("Next step: pass this path into send_contract_for_signature() in box_sign.py")
+    print("Next step: pass this deal + agreed price into dispatch_agreed_deal() "
+          "in deal_dispatch.py to test the email-to-owner flow (Box Sign is on hold).")

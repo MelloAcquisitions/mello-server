@@ -36,6 +36,7 @@ need to fill those in before anything is signature-ready.
 """
 
 import os
+import re
 import smtplib
 from datetime import date, timedelta
 from email.mime.base import MIMEBase
@@ -45,11 +46,25 @@ from email import encoders
 
 from contract_generator import generate_contract
 
+
+def _clean_credential(value):
+    """
+    Strips ALL whitespace, including non-breaking spaces (\\xa0) — Google's
+    app-password page displays the password with spaces for readability,
+    and copy-pasting from a browser sometimes turns those into non-breaking
+    spaces rather than normal ones, which smtplib's login step can't encode
+    as ASCII. Stripping here means it doesn't matter how it was pasted.
+    """
+    if value is None:
+        return None
+    return re.sub(r"\s+", "", value)
+
+
 EMAIL_HOST = os.environ.get("EMAIL_HOST", "smtp.gmail.com")
 EMAIL_PORT = int(os.environ.get("EMAIL_PORT", 587))
-EMAIL_USERNAME = os.environ.get("EMAIL_USERNAME")
-EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD")
-OWNER_EMAIL = os.environ.get("OWNER_EMAIL")
+EMAIL_USERNAME = _clean_credential(os.environ.get("EMAIL_USERNAME"))
+EMAIL_PASSWORD = _clean_credential(os.environ.get("EMAIL_PASSWORD"))
+OWNER_EMAIL = _clean_credential(os.environ.get("OWNER_EMAIL"))
 
 BUYER_NAME = os.environ.get("BUYER_NAME", "Mello Acquisitions LLC")
 BUYER_PHONE = os.environ.get("BUYER_PHONE", "")
