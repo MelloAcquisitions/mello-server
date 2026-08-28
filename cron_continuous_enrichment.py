@@ -3,6 +3,10 @@
 from airtable_helpers import query_leads, upsert_lead
 from orchestrator_lib import enrich_lead_with_valuation
 
+# Same range as cron_morning_lead_prep.py — keep both filters in sync
+MIN_ARV = 100000
+MAX_ARV = 650000
+
 if __name__ == "__main__":
     print("Running periodic enrichment check...")
 
@@ -18,8 +22,15 @@ if __name__ == "__main__":
             valuation = enrich_lead_with_valuation(
                 address, fields.get("city", ""), fields.get("state", ""), fields.get("zip", "")
             )
-            upsert_lead(address, {"arv": valuation["recommended_arv"]})
-            print(f"  Enriched: {address} — ARV: {valuation['recommended_arv']}")
+            arv = valuation["recommended_arv"]
+
+            if not (MIN_ARV <= arv <= MAX_ARV):
+                print(f"  {address} — ARV ${arv:,} outside target range, marking Rejected")
+                upsert_lead(address, {"arv": arv, "status": "Rejected"})
+                continue
+
+            upsert_lead(address, {"arv": arv})
+            print(f"  Enriched: {address} — ARV: {arv}")
         except Exception as e:
             print(f"  FAILED to enrich {address}: {e}")
             continue

@@ -118,11 +118,22 @@ def extract_lead_summary(raw_result: dict) -> list:
         address = prop.get("address", {})
         owner = prop.get("owner", {})
         phone_numbers = owner.get("phoneNumbers", [])
-        # Prefer a reachable, non-DNC number if one exists
+        # Only ever select a reachable, non-DNC, non-litigator number.
+        # NO fallback to a risky number if no clean one exists — skip the
+        # lead entirely rather than ever calling a DNC-listed or flagged
+        # TCPA litigator number. This was a real gap: the previous fallback
+        # would silently pick ANY number, including a flagged one, if no
+        # clean option existed.
         best_phone = next(
-            (p["number"] for p in phone_numbers if p.get("reachable") and not p.get("dnc")),
-            phone_numbers[0]["number"] if phone_numbers else None,
+            (p["number"] for p in phone_numbers
+             if p.get("reachable") and not p.get("dnc") and not p.get("litigator")),
+            None,
         )
+
+        if not best_phone:
+            print(f"  Skipping {address.get('formattedStreet') or address.get('street')} — "
+                  f"no compliant phone number (DNC, litigator, or unreachable)")
+            continue
 
         quick_lists = prop.get("quickLists", {})
         matched_signals = [k for k, v in quick_lists.items() if v is True]
@@ -141,11 +152,22 @@ def extract_lead_summary(raw_result: dict) -> list:
 
 
 if __name__ == "__main__":
-    # Test pull — adjust city/state to your actual target market
-    raw = get_daily_leads(city="Austin", state="TX", limit=15)
+    # Test pull — adjust markets to your actual target zones
+    raw = get_daily_leads(markets=[{"city": "Austin", "state": "TX"}], limit=15)
     leads = extract_lead_summary(raw)
 
-    print(f"Pulled {len(leads)} leads:")
+    print(f"Pulled {len(leads)} compliant leads:")
     for lead in leads:
         print(f"  {lead['address']}, {lead['city']}, {lead['state']} — "
               f"{lead['owner_name']} — {lead['phone']} — {lead['source']}")
+
+    # IMPORTANT: run this once and actually look at the output below —
+    # confirms the exact field names BatchData uses for DNC/litigator
+    # status, so extract_lead_summary()'s filtering is checking the right
+    # keys rather than a guessed name.
+    print("\n=== RAW phoneNumbers structure (verify DNC/litigator field names) ===")
+    properties = raw.get("results", {}).get("properties", [])
+    if properties:
+        raw_phones = properties[0].get("owner", {}).get("phoneNumbers", [])
+        for phone in raw_phones[:3]:
+            print(f"  {phone}")
