@@ -74,9 +74,14 @@ if __name__ == "__main__":
                                      # attempt, so a permanently broken number
                                      # doesn't get retried every single cycle
         try:
+            city = fields.get("city")
+            zip_code = fields.get("zip")
+            city_state_zip = ", ".join(p for p in [city, " ".join(p2 for p2 in [state, zip_code] if p2)] if p)
+            full_property_address = f"{address}, {city_state_zip}" if city_state_zip else f"{address}, {state}"
+
             call_context = {
                 "seller_name": fields.get("owner_name", "there"),
-                "property_address": address,
+                "property_address": full_property_address,
                 "recommended_arv": str(fields.get("arv")),
             }
             result = trigger_vapi_call(phone, call_context)

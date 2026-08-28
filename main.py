@@ -37,6 +37,7 @@ from rentcast_lookup import (
 from zillapi_lookup import get_zillow_valuation, extract_zestimate
 from dashboard import router as dashboard_router
 from airtable_helpers import find_lead_record, upsert_lead, query_leads, AirtableError
+from deal_dispatch import dispatch_agreed_deal
 
 app = FastAPI(title="Mello Acquisitions Agent Tools")
 app.include_router(dashboard_router)
@@ -88,16 +89,22 @@ class WholetailRequest(BaseModel):
 class LogCallRequest(BaseModel):
     address: str
     status: str  # Must exactly match your Airtable single-select options (case-sensitive):
-                 # New | Contacted | Qualified | Offer Made | Agreed | Rejected | Opt Out | Human Call
+                 # New | Contacted | Qualified | Offer Made | Agreed | Rejected | Opt Out | Human Call | Exhausted
     notes: Optional[str] = ""
     offer_amount: Optional[float] = None
     arv: Optional[float] = None
+    repair_estimate: Optional[float] = None
+    mao_floor: Optional[float] = None
+    email: Optional[str] = None
 
 
 class FlagReviewRequest(BaseModel):
     address: str
     agreed_price: float
     call_transcript_summary: str
+    email: Optional[str] = None
+    repair_estimate: Optional[float] = None
+    mao_floor: Optional[float] = None
 
 
 # ---------------------------------------------------------------------------
@@ -227,6 +234,12 @@ def log_call_outcome(req: LogCallRequest):
         fields["offer_amount"] = req.offer_amount
     if req.arv is not None:
         fields["arv"] = req.arv
+    if req.repair_estimate is not None:
+        fields["repair_estimate"] = req.repair_estimate
+    if req.mao_floor is not None:
+        fields["mao_floor"] = req.mao_floor
+    if req.email is not None:
+        fields["email"] = req.email
 
     result = upsert_lead(req.address, fields)
     return {"success": True, "airtable_record": result.get("id"), "call_count": current_call_count + 1}
@@ -348,11 +361,16 @@ async def vapi_call_ended(request: Request):
 def flag_for_human_review(req: FlagReviewRequest):
     """
     Called ONLY when a seller verbally agrees to a price. Marks the lead as
-    needing human review before any contract is sent — this does NOT send
-    a contract itself. Pair this with an Airtable automation (built in
-    Airtable's own interface, no code needed) that emails/texts you whenever
-    a record's status changes to "Agreed", so you get a fast notification
-    to approve without holding up the call.
+    Agreed, then generates the filled purchase agreement and emails it to
+    YOU (not the seller) for review — see deal_dispatch.py. This is the
+    interim workflow while Box Sign's paid tier is on hold: it does NOT
+    send anything to the seller itself. You still review the attached
+    contract, add a signature field, and send it on yourself.
+
+    Contract generation/email is best-effort: if it fails (e.g. Mailgun
+    isn't configured yet), the "Agreed" status and deal details are still
+    saved to Airtable — you'd just need to notice it on the dashboard and
+    generate the contract manually instead of from your inbox.
     """
     fields = {
         "status": "Agreed",
@@ -360,5 +378,34 @@ def flag_for_human_review(req: FlagReviewRequest):
         "call_transcript_summary": req.call_transcript_summary,
         "last_call_date": __import__("datetime").date.today().isoformat(),
     }
+    if req.email is not None:
+        fields["email"] = req.email
+    if req.repair_estimate is not None:
+        fields["repair_estimate"] = req.repair_estimate
+    if req.mao_floor is not None:
+        fields["mao_floor"] = req.mao_floor
+
     result = upsert_lead(req.address, fields)
-    return {"success": True, "airtable_record": result.get("id"), "needs_human_review": True}
+
+    contract_emailed = False
+    dispatch_error = None
+    try:
+        full_record = find_lead_record(req.address)
+        # Fall back to the fields we just wrote if the read-back somehow
+        # misses — dispatch should still have enough to work with either way.
+        lead_fields = full_record["fields"] if full_record else {**fields, "address": req.address}
+        dispatch_agreed_deal(lead_fields, req.agreed_price)
+        contract_emailed = True
+        current_emails = lead_fields.get("#_emails", 0)
+        upsert_lead(req.address, {"#_emails": current_emails + 1})
+    except Exception as e:
+        dispatch_error = str(e)
+        print(f"Contract dispatch failed (Agreed status still saved — handle manually): {e}")
+
+    return {
+        "success": True,
+        "airtable_record": result.get("id"),
+        "needs_human_review": True,
+        "contract_emailed": contract_emailed,
+        "dispatch_error": dispatch_error,
+    }

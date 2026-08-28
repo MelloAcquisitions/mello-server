@@ -47,6 +47,8 @@ if __name__ == "__main__":
                 "status": "New",
                 "arv": arv,
                 "state": lead["state"],
+                "city": lead.get("city", ""),
+                "zip": lead.get("zip", ""),
                 # date_created intentionally NOT set here — it's a computed
                 # "Created time" field in Airtable that auto-populates
                 # itself; writing to it manually causes a 422 error.
