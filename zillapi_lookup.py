@@ -10,19 +10,17 @@ SETUP:
 3. Set it as an environment variable: export ZILLAPI_KEY="zk_your-key-here"
 4. Run: python zillapi_lookup.py
 
-NOTE: I've built this against Zillapi's documented base URL and auth pattern
-(confirmed from their own docs), but I have not tested it with a live key.
-Before relying on this in production, quickly check api.zillapi.com/openapi.json
-in your browser to confirm the exact address-lookup path matches what's below —
-same precaution that would have saved us the BatchData/RentCast guessing
-rounds earlier in this build.
+CONFIRMED (previously unverified, now fixed against a live 404): the
+address-lookup endpoint is /v1/properties/by-address, not /v1/properties.
+The response also comes wrapped in a {"data": {...}} envelope, not flat —
+both the URL and the parsing below account for that now.
 """
 
 import os
 import requests
 
 ZILLAPI_KEY = os.environ.get("ZILLAPI_KEY")
-BASE_URL = "https://api.zillapi.com/v1/properties"
+BASE_URL = "https://api.zillapi.com/v1/properties/by-address"
 
 
 def get_zillow_valuation(full_address: str) -> dict:
@@ -32,6 +30,9 @@ def get_zillow_valuation(full_address: str) -> dict:
     from RentCast's own AVM, useful as a real second opinion.
 
     full_address: a single string, e.g. "6506 Clubway Ln, Austin, TX 78745"
+
+    Returns the "data" object directly (the envelope is unwrapped here),
+    so callers don't need to know about Zillapi's response wrapper.
     """
     if not ZILLAPI_KEY:
         raise RuntimeError(
@@ -47,14 +48,18 @@ def get_zillow_valuation(full_address: str) -> dict:
         print(f"Zillapi returned an error ({response.status_code}):")
         print(response.text)
     response.raise_for_status()
-    return response.json()
+    body = response.json()
+    # Real responses come wrapped as {"data": {...}, "request_id": "..."} —
+    # unwrap it here, but fall back to the raw body if that shape ever
+    # changes rather than silently returning nothing useful.
+    return body.get("data", body)
 
 
 def extract_zestimate(zillow_result: dict) -> float:
     """
-    Pulls just the Zestimate number out of the full response, defensively —
-    field name confirmed from Zillapi's docs as 'zestimate', but falls back
-    to None rather than crashing if their schema differs from what's documented.
+    Pulls just the Zestimate number out of the (already-unwrapped) result,
+    defensively — falls back to None rather than crashing if their schema
+    differs from what's documented.
     """
     return zillow_result.get("zestimate") or zillow_result.get("price")
 
