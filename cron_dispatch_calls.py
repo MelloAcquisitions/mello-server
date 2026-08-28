@@ -1,13 +1,29 @@
 """Render Cron Job: runs every 15 min, 8am-9pm. Schedule in Render: */15 8-20 * * *"""
 
-from airtable_helpers import query_leads, upsert_lead
+import os
+
+from airtable_helpers import (
+    query_leads, upsert_lead, get_todays_call_count, increment_todays_call_count,
+)
 from orchestrator_lib import (
     trigger_vapi_call, is_within_calling_hours, MAX_CALLS_PER_DISPATCH_RUN,
     is_retry_due, is_lead_exhausted,
 )
 
+# Hard daily cap — a real circuit-breaker. Adjust via env var without a
+# code change. Default is generous headroom above the ~45-60/day steady
+# state estimate, while still stopping genuine runaway behavior from a bug.
+MAX_CALLS_PER_DAY = int(os.environ.get("MAX_CALLS_PER_DAY", 80))
+
 if __name__ == "__main__":
     print("Checking for leads ready to call...")
+
+    todays_count = get_todays_call_count()
+    if todays_count >= MAX_CALLS_PER_DAY:
+        print(f"  DAILY CAP REACHED ({todays_count}/{MAX_CALLS_PER_DAY}) — "
+              f"stopping for safety. No calls placed this run.")
+        exit()
+    print(f"  {todays_count}/{MAX_CALLS_PER_DAY} calls made today")
 
     # Build a suppression set FIRST — never call a number that's ever opted out,
     # even if a "new" lead record technically exists for that address again.
@@ -68,6 +84,7 @@ if __name__ == "__main__":
             # answered. If the call connects, the live agent's own
             # log_call_outcome call overwrites this with the true outcome.
             upsert_lead(address, {"#_calls": new_count})
+            increment_todays_call_count(1)  # real spend counter — only on actual success
             print(f"  Called {address} (attempt {new_count}) — Vapi call ID: {result.get('id')}")
             calls_made += 1
         except Exception as e:
