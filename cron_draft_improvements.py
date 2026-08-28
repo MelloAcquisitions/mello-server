@@ -58,7 +58,8 @@ def get_real_outcome(phone: str) -> str:
     if not phone:
         return "Unknown (no phone number on call record)"
     try:
-        records = query_leads(f"{{phone}}='{phone}'")
+        safe_phone = phone.replace("\\", "\\\\").replace("'", "\\'")
+        records = query_leads(f"{{phone}}='{safe_phone}'")
         if records:
             return records[0]["fields"].get("status", "Unknown")
     except Exception as e:

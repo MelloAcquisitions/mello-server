@@ -36,7 +36,7 @@ from rentcast_lookup import (
 )
 from zillapi_lookup import get_zillow_valuation, extract_zestimate
 from dashboard import router as dashboard_router
-from airtable_helpers import find_lead_record, upsert_lead, AirtableError
+from airtable_helpers import find_lead_record, upsert_lead, query_leads, AirtableError
 
 app = FastAPI(title="Mello Acquisitions Agent Tools")
 app.include_router(dashboard_router)
@@ -319,11 +319,14 @@ async def vapi_call_ended(request: Request):
     if not phone:
         return {"received": True, "warning": "no phone number in payload"}
 
-    # NOTE: find_lead_record looks up by address currently. To look up by
-    # phone specifically, use query_leads(f"{{phone}}='{phone}'") instead —
-    # left this way for now, adjust if phone-based lookup proves necessary.
+    # find_lead_record() filters by the "address" field, so it can never
+    # match a phone number — this webhook needs a phone-based lookup instead.
+    # Escape any single quotes so a stray character can't break the Airtable
+    # formula (matches the same precaution used elsewhere on user-supplied data).
     try:
-        record = find_lead_record(phone)
+        safe_phone = phone.replace("'", "\\'")
+        matches = query_leads(f"{{phone}}='{safe_phone}'", max_records=1)
+        record = matches[0] if matches else None
     except Exception:
         record = None
 

@@ -15,7 +15,7 @@ dependency — passing the variables alone doesn't help if the prompt still
 tells the agent to fetch them itself.
 """
 
-from orchestrator import enrich_lead_with_valuation, trigger_vapi_call
+from orchestrator_lib import enrich_lead_with_valuation, trigger_vapi_call
 from calculator import flip_mao
 
 # Real test property — same one we've verified data for throughout this build

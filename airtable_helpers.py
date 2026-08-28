@@ -25,6 +25,16 @@ class AirtableError(Exception):
         super().__init__(f"Airtable error ({status_code}): {detail}")
 
 
+def _escape_formula_value(value: str) -> str:
+    """
+    Escapes a value for safe interpolation inside an Airtable filterByFormula
+    string literal. Without this, an address or name containing a single
+    quote (e.g. "O'Brien St") breaks the formula syntax outright — and in
+    principle a crafted value could alter the filter logic entirely.
+    """
+    return str(value).replace("\\", "\\\\").replace("'", "\\'")
+
+
 def _airtable_headers():
     if not AIRTABLE_API_KEY:
         raise AirtableError(500, "AIRTABLE_API_KEY not set")
@@ -36,7 +46,7 @@ def _airtable_headers():
 
 def find_lead_record(address: str) -> Optional[dict]:
     """Returns the full Airtable record (id + fields) matching this address, or None."""
-    params = {"filterByFormula": f"{{address}} = '{address}'"}
+    params = {"filterByFormula": f"{{address}} = '{_escape_formula_value(address)}'"}
     response = requests.get(AIRTABLE_URL, headers=_airtable_headers(), params=params, timeout=15)
     if not response.ok:
         raise AirtableError(response.status_code, f"lookup failed: {response.text}")

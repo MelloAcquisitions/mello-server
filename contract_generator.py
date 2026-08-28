@@ -1,6 +1,6 @@
 """
 Fills the Purchase Agreement template with deal-specific details and saves
-a real .docx file ready to send via PandaDoc.
+a real .docx file ready to send for signature via Box Sign (box_sign.py).
 
 SETUP: pip install docxtpl python-docx
 Requires purchase_agreement_template.docx to exist in the same folder.
@@ -46,3 +46,4 @@ if __name__ == "__main__":
 
     path = generate_contract(test_deal)
     print(f"Contract generated: {path}")
+    print("Next step: pass this path into send_contract_for_signature() in box_sign.py")

@@ -5,7 +5,7 @@ the phone-not-answering issue so you don't burn RentCast credits on every
 retry.
 """
 
-from orchestrator import trigger_vapi_call
+from orchestrator_lib import trigger_vapi_call
 
 # Cached from our last successful pre-fetch — no need to hit RentCast again
 # while we're just testing whether the call itself connects and rings.
