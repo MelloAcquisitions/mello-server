@@ -29,11 +29,13 @@ def has_unresolved_proposal() -> bool:
 
 def get_todays_transcripts() -> list:
     """
-    Pulls today's call transcripts from Vapi. NOTE: I haven't confirmed the
-    exact filter parameter names against a live account — verify this
-    against Vapi's current API reference (or test via /docs-equivalent)
-    before trusting it fully, same precaution as every other new endpoint
-    in this build.
+    Pulls today's calls from Vapi, including each call's phone number so
+    it can be cross-referenced against the real outcome in Airtable — a
+    transcript alone doesn't tell Claude whether the call actually worked.
+
+    NOTE: I haven't confirmed the exact filter parameter names against a
+    live account — verify this against Vapi's current API reference before
+    trusting it fully, same precaution as every other new endpoint.
     """
     headers = {"Authorization": f"Bearer {VAPI_API_KEY}"}
     today_start = datetime.now().replace(hour=0, minute=0, second=0).isoformat()
@@ -41,16 +43,40 @@ def get_todays_transcripts() -> list:
     response = requests.get("https://api.vapi.ai/call", headers=headers, params=params, timeout=30)
     response.raise_for_status()
     calls = response.json()
-    return [c.get("transcript", "") for c in calls if c.get("transcript")]
+    return [
+        {"phone": c.get("customer", {}).get("number"), "transcript": c.get("transcript", "")}
+        for c in calls if c.get("transcript")
+    ]
 
 
-def draft_proposal(transcripts: list) -> dict:
-    """Sends today's transcripts to Claude, asking for a specific, small
-    proposed change — not a full prompt rewrite. Small, reviewable diffs
-    are easier for you to approve confidently than a wall of new text."""
+def get_real_outcome(phone: str) -> str:
+    """
+    Looks up the ACTUAL outcome Airtable recorded for this phone number —
+    this is the ground truth Claude needs. Without this, it's just reading
+    conversation text with no idea whether the call actually succeeded.
+    """
+    if not phone:
+        return "Unknown (no phone number on call record)"
+    try:
+        records = query_leads(f"{{phone}}='{phone}'")
+        if records:
+            return records[0]["fields"].get("status", "Unknown")
+    except Exception as e:
+        print(f"  Could not look up outcome for {phone}: {e}")
+    return "Unknown"
+
+
+def draft_proposal(calls_with_outcomes: list) -> dict:
+    """Sends today's transcripts to Claude WITH their real outcomes, asking
+    for a specific, small proposed change — not a full prompt rewrite.
+    Small, reviewable diffs are easier for you to approve confidently than
+    a wall of new text."""
     client = Anthropic()  # reads ANTHROPIC_API_KEY from environment automatically
 
-    combined = "\n\n---CALL---\n\n".join(transcripts[:10])  # cap to avoid huge prompts
+    combined = "\n\n---CALL---\n\n".join(
+        f"OUTCOME: {c['outcome']}\nTRANSCRIPT:\n{c['transcript']}"
+        for c in calls_with_outcomes[:10]  # cap to avoid huge prompts
+    )
     message = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=1000,
@@ -58,14 +84,18 @@ def draft_proposal(transcripts: list) -> dict:
             "role": "user",
             "content": (
                 "Below are today's real sales call transcripts for an AI real estate "
-                "acquisitions agent. Review them for ONE specific, recurring pattern "
-                "worth fixing — an objection handled poorly, a phrase that caused "
-                "friction, a moment the agent should have said something different. "
-                "Propose ONE small, specific addition or edit to the agent's system "
-                "prompt that would fix it. Do not rewrite the whole prompt — just the "
-                "one change. Format your response as:\n\nREASONING: [why this change]\n"
-                "PROPOSED CHANGE: [the exact text to add/change]\n\n"
-                f"TRANSCRIPTS:\n{combined}"
+                "acquisitions agent, each labeled with its ACTUAL outcome (Agreed, "
+                "Rejected, Opt Out, etc.) from the CRM. Use the outcome to judge "
+                "which patterns actually worked versus which ones led to a bad "
+                "result — don't just react to how a call sounded. Review them for "
+                "ONE specific, recurring pattern worth fixing — an objection handled "
+                "poorly, a phrase that caused friction, a moment the agent should "
+                "have said something different. Propose ONE small, specific addition "
+                "or edit to the agent's system prompt that would fix it. Do not "
+                "rewrite the whole prompt — just the one change. Format your "
+                "response as:\n\nREASONING: [why this change, referencing the real "
+                "outcomes]\nPROPOSED CHANGE: [the exact text to add/change]\n\n"
+                f"CALLS:\n{combined}"
             ),
         }],
     )
@@ -96,11 +126,15 @@ if __name__ == "__main__":
         print("  An unresolved proposal already exists — skipping tonight's draft "
               "until you approve or reject the pending one. No backlog piles up.")
     else:
-        transcripts = get_todays_transcripts()
-        if not transcripts:
+        calls = get_todays_transcripts()
+        if not calls:
             print("  No transcripts found for today — nothing to analyze.")
         else:
-            print(f"  Analyzing {len(transcripts)} call(s)...")
-            proposal = draft_proposal(transcripts)
+            print(f"  Looking up real outcomes for {len(calls)} call(s)...")
+            for call in calls:
+                call["outcome"] = get_real_outcome(call["phone"])
+
+            print(f"  Analyzing {len(calls)} call(s) with real outcomes attached...")
+            proposal = draft_proposal(calls)
             save_proposal(proposal)
             print(f"  Proposal saved: {proposal['reasoning'][:80]}...")
