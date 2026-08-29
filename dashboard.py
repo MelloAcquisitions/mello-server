@@ -23,6 +23,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
+from airtable_helpers import DAILY_LOG_TABLE
+
 router = APIRouter()
 security = HTTPBasic()
 
@@ -120,48 +122,101 @@ def get_productivity_json(authorized: bool = Depends(check_password)):
 @router.get("/api/dashboard/costs")
 def get_costs_json(authorized: bool = Depends(check_password)):
     """
-    Estimated costs, not live billing data — none of your providers expose
-    a simple real-time spend API, so this is built from counts we already
-    track (calls made, leads sourced) multiplied by known per-unit rates.
-    Treat this as a solid estimate, not an exact invoice match.
+    Costs, split into what's genuinely real vs. still estimated:
+
+    - VAPI_COST_PER_MINUTE and BATCHDATA_COST_PER_CALL are REAL rates
+      derived from actual observed charges (not guesses) — set as env vars
+      so you can refine them as you get more real data points, without a
+      code change. Multiplied by REAL tracked usage (call_seconds_today,
+      batchdata_calls_today — see main.py's vapi_call_ended webhook and
+      lead_sourcing.py), this gives an actual usage-based estimate instead
+      of a flat per-call/per-lead guess.
+    - FIXED_MONTHLY is a hand-maintained list of what you actually pay —
+      real, but only as accurate as you keep it updated here.
+    - RentCast is deliberately NOT in FIXED_MONTHLY — still on the free
+      tier (no current cost), so its future paid-tier cost is shown
+      separately under "upcoming_costs" rather than inflating today's total.
     """
-    COST_PER_CALL = 1.50
-    COST_PER_LEAD = 0.15
+    VAPI_COST_PER_MINUTE = float(os.environ.get("VAPI_COST_PER_MINUTE", 0.0722))  # derived: $0.26 / 3.6 min (3m36s)
+    # BatchData bills per property record returned, plus extra per skip-trace
+    # match — NOT per API call (confirmed from their docs; a flat per-call
+    # rate was disproven by real data ranging $0.006 to $1.20 per call on
+    # different days). These two rates are UNCALIBRATED placeholders — pull
+    # your real per-record and per-skip-trace-match rate from BatchData's own
+    # billing/usage page and set these env vars once you have them.
+    BATCHDATA_COST_PER_RECORD = float(os.environ.get("BATCHDATA_COST_PER_RECORD", 0.05))
+    BATCHDATA_COST_PER_SKIPTRACE_MATCH = float(os.environ.get("BATCHDATA_COST_PER_SKIPTRACE_MATCH", 0.10))
+
+    # Real, hand-maintained recurring costs. Update whenever a subscription changes.
     FIXED_MONTHLY = {
-        "Box Business Starter": 9.60,
+        "Box (paid annual plan, Sign not yet upgraded)": 15.00,  # $180/yr ÷ 12
         "Render (6 cron jobs, estimated)": 1.00,
-        "RentCast/Zillapi/Anthropic (light usage)": 5.00,
+        "Zillapi/Anthropic (light usage, estimated)": 5.00,
+    }
+    # Not currently being charged — shown separately so it's visible without
+    # inflating today's real total.
+    UPCOMING_COSTS = {
+        "RentCast (after upgrading from free tier)": 74.00,
     }
 
     headers = {"Authorization": f"Bearer {AIRTABLE_API_KEY}"}
-    daily_log_url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/Daily Log"
+    daily_log_url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{DAILY_LOG_TABLE}"
     response = requests.get(daily_log_url, headers=headers, timeout=15)
     daily_records = response.json().get("records", []) if response.ok else []
 
-    total_calls_tracked = sum(r["fields"].get("calls_today", 0) for r in daily_records)
+    total_call_seconds = sum(r["fields"].get("call_seconds_today", 0) for r in daily_records)
+    total_batchdata_calls = sum(r["fields"].get("batchdata_calls_today", 0) for r in daily_records)
+    total_batchdata_properties = sum(r["fields"].get("batchdata_properties_today", 0) for r in daily_records)
+    total_batchdata_skiptrace_matches = sum(r["fields"].get("batchdata_skiptrace_matches_today", 0) for r in daily_records)
 
     from datetime import date
     today = date.today().isoformat()
     todays_record = next((r for r in daily_records if r["fields"].get("date") == today), None)
-    todays_calls = todays_record["fields"].get("calls_today", 0) if todays_record else 0
+    todays_call_seconds = todays_record["fields"].get("call_seconds_today", 0) if todays_record else 0
+    todays_batchdata_calls = todays_record["fields"].get("batchdata_calls_today", 0) if todays_record else 0
+    todays_batchdata_properties = todays_record["fields"].get("batchdata_properties_today", 0) if todays_record else 0
+    todays_batchdata_skiptrace_matches = todays_record["fields"].get("batchdata_skiptrace_matches_today", 0) if todays_record else 0
 
-    total_leads_ever = len(_fetch_all_leads())
+    def batchdata_cost(properties, skiptrace_matches):
+        return round(properties * BATCHDATA_COST_PER_RECORD + skiptrace_matches * BATCHDATA_COST_PER_SKIPTRACE_MATCH, 2)
+
+    todays_vapi_cost = round((todays_call_seconds / 60) * VAPI_COST_PER_MINUTE, 2)
+    todays_batchdata_cost = batchdata_cost(todays_batchdata_properties, todays_batchdata_skiptrace_matches)
+
     fixed_monthly_total = sum(FIXED_MONTHLY.values())
+    upcoming_monthly_total = sum(UPCOMING_COSTS.values())
 
     return {
         "today": {
-            "calls": todays_calls,
-            "estimated_cost": round(todays_calls * COST_PER_CALL, 2),
+            "call_minutes": round(todays_call_seconds / 60, 1),
+            "vapi_cost": todays_vapi_cost,
+            "batchdata_calls": todays_batchdata_calls,
+            "batchdata_properties": todays_batchdata_properties,
+            "batchdata_skiptrace_matches": todays_batchdata_skiptrace_matches,
+            "batchdata_cost": todays_batchdata_cost,
+            "estimated_cost": round(todays_vapi_cost + todays_batchdata_cost, 2),
         },
         "all_time": {
-            "total_calls_tracked": total_calls_tracked,
-            "estimated_call_cost": round(total_calls_tracked * COST_PER_CALL, 2),
-            "total_leads_sourced": total_leads_ever,
-            "estimated_lead_cost": round(total_leads_ever * COST_PER_LEAD, 2),
+            "total_call_minutes": round(total_call_seconds / 60, 1),
+            "estimated_vapi_cost": round((total_call_seconds / 60) * VAPI_COST_PER_MINUTE, 2),
+            "total_batchdata_calls": total_batchdata_calls,
+            "total_batchdata_properties": total_batchdata_properties,
+            "total_batchdata_skiptrace_matches": total_batchdata_skiptrace_matches,
+            "estimated_batchdata_cost": batchdata_cost(total_batchdata_properties, total_batchdata_skiptrace_matches),
         },
         "fixed_monthly_subscriptions": FIXED_MONTHLY,
         "fixed_monthly_total": round(fixed_monthly_total, 2),
-        "note": "Estimated from tracked usage counts and known rates — not live billing data from each provider.",
+        "upcoming_costs": UPCOMING_COSTS,
+        "upcoming_monthly_total": round(upcoming_monthly_total, 2),
+        "note": (
+            f"Vapi cost uses a real derived rate (${VAPI_COST_PER_MINUTE:.4f}/min from an actual call) "
+            f"× tracked call minutes. BatchData now tracks the actual billing units per their docs — "
+            f"property records returned and skip-trace matches — but the two per-unit rates "
+            f"(${BATCHDATA_COST_PER_RECORD:.2f}/record, ${BATCHDATA_COST_PER_SKIPTRACE_MATCH:.2f}/match) "
+            f"are UNCALIBRATED placeholders, not real numbers yet. Pull your actual rates from BatchData's "
+            f"billing page and set BATCHDATA_COST_PER_RECORD / BATCHDATA_COST_PER_SKIPTRACE_MATCH. "
+            f"BatchData's $50 prepaid credit balance itself isn't tracked as a running total yet."
+        ),
     }
 
 
@@ -509,13 +564,21 @@ async function loadCosts() {
     const data = await res.json();
     el.innerHTML = `
       <div class="stats">
-        <div class="stat-card"><div class="num">$${data.today.estimated_cost}</div><div class="label">Today (est.)</div></div>
-        <div class="stat-card"><div class="num">$${data.all_time.estimated_call_cost}</div><div class="label">All-time calls (est.)</div></div>
-        <div class="stat-card"><div class="num">$${data.all_time.estimated_lead_cost}</div><div class="label">All-time leads (est.)</div></div>
+        <div class="stat-card"><div class="num">$${data.today.estimated_cost}</div><div class="label">Today (Vapi + BatchData)</div></div>
+        <div class="stat-card"><div class="num">${data.today.call_minutes}</div><div class="label">Call minutes today</div></div>
+        <div class="stat-card"><div class="num">${data.today.batchdata_properties}</div><div class="label">BatchData records today</div></div>
+        <div class="stat-card"><div class="num">${data.today.batchdata_skiptrace_matches}</div><div class="label">Skip-trace matches today</div></div>
         <div class="stat-card"><div class="num">$${data.fixed_monthly_total}</div><div class="label">Fixed monthly subs</div></div>
       </div>
+      <h3 style="font-size:14px;margin-top:24px">All-time usage</h3>
+      <div class="job-row"><span>Total call minutes</span><span>${data.all_time.total_call_minutes} min (est. $${data.all_time.estimated_vapi_cost})</span></div>
+      <div class="job-row"><span>Total BatchData records / skip-trace matches</span><span>${data.all_time.total_batchdata_properties} / ${data.all_time.total_batchdata_skiptrace_matches} (est. $${data.all_time.estimated_batchdata_cost})</span></div>
       <h3 style="font-size:14px;margin-top:24px">Fixed monthly subscriptions</h3>
       ${Object.entries(data.fixed_monthly_subscriptions).map(([name, cost]) =>
+        `<div class="job-row"><span>${name}</span><span>$${cost}/mo</span></div>`
+      ).join('')}
+      <h3 style="font-size:14px;margin-top:24px">Upcoming (not yet being charged)</h3>
+      ${Object.entries(data.upcoming_costs).map(([name, cost]) =>
         `<div class="job-row"><span>${name}</span><span>$${cost}/mo</span></div>`
       ).join('')}
       <div class="note-box">${data.note}</div>

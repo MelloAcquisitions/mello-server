@@ -20,6 +20,8 @@ or wire into a scheduled job later.
 import os
 import requests
 
+from airtable_helpers import increment_daily_log_field
+
 BATCHDATA_API_KEY = os.environ.get("BATCHDATA_API_KEY")
 BASE_URL = "https://api.batchdata.com/api/v1/property/search"
 
@@ -103,6 +105,25 @@ def get_daily_leads(
         properties = result.get("results", {}).get("properties", [])
         print(f"  {market['city']}, {market['state']}: {len(properties)} properties found")
         all_properties.extend(properties)
+
+        # BatchData bills per property record returned, plus extra per
+        # skip-trace phone match — NOT per API call (confirmed from their
+        # docs). Track the real billing units instead of call count. The
+        # exact location of resultCount/skipTraceMatchCount in the response
+        # isn't confirmed against a live payload yet — printed below so you
+        # can verify on the next real run and I can correct the path if needed.
+        meta = result.get("meta") or result.get("results", {}).get("meta") or {}
+        if meta:
+            print(f"  BatchData meta for {market}: {meta}")
+        result_count = meta.get("resultCount", len(properties))
+        skiptrace_match_count = meta.get("skipTraceMatchCount", 0)
+
+        try:
+            increment_daily_log_field("batchdata_calls_today", 1)
+            increment_daily_log_field("batchdata_properties_today", result_count)
+            increment_daily_log_field("batchdata_skiptrace_matches_today", skiptrace_match_count)
+        except Exception as e:
+            print(f"Failed to record BatchData usage for cost tracking: {e}")
 
     return {"results": {"properties": all_properties}}
 

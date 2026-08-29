@@ -133,3 +133,36 @@ def increment_todays_call_count(by: int = 1):
         )
     if not patch_response.ok:
         raise AirtableError(patch_response.status_code, f"daily log write failed: {patch_response.text}")
+
+
+def increment_daily_log_field(field_name: str, by: float = 1):
+    """
+    Generic version of increment_todays_call_count() for any other running
+    daily total you want tracked — e.g. total call seconds (for a real,
+    duration-based Vapi cost estimate) or BatchData request count (for a
+    real, usage-based BatchData cost estimate), instead of flat per-unit
+    guesses. Same day-record-per-row pattern as calls_today.
+    """
+    from datetime import date
+    today = date.today().isoformat()
+    headers = _airtable_headers()
+    params = {"filterByFormula": f"{{date}}='{today}'"}
+    response = requests.get(DAILY_LOG_URL, headers=headers, params=params, timeout=15)
+    if not response.ok:
+        raise AirtableError(response.status_code, f"daily log read failed: {response.text}")
+    records = response.json().get("records", [])
+
+    if records:
+        record_id = records[0]["id"]
+        current = records[0]["fields"].get(field_name, 0)
+        patch_response = requests.patch(
+            f"{DAILY_LOG_URL}/{record_id}", headers=headers,
+            json={"fields": {field_name: current + by}}, timeout=15,
+        )
+    else:
+        patch_response = requests.post(
+            DAILY_LOG_URL, headers=headers,
+            json={"fields": {"date": today, field_name: by}}, timeout=15,
+        )
+    if not patch_response.ok:
+        raise AirtableError(patch_response.status_code, f"daily log write failed ({field_name}): {patch_response.text}")

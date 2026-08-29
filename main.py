@@ -23,11 +23,11 @@ import os
 from typing import Optional
 
 import requests
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from calculator import flip_mao, wholetail_calculator, calculate_final_fee
+from calculator import flip_mao, calculate_final_fee
 from rentcast_lookup import (
     get_sold_comps,
     get_property_valuation,
@@ -36,7 +36,7 @@ from rentcast_lookup import (
 )
 from zillapi_lookup import get_zillow_valuation, extract_zestimate
 from dashboard import router as dashboard_router
-from airtable_helpers import find_lead_record, upsert_lead, query_leads, AirtableError
+from airtable_helpers import find_lead_record, upsert_lead, query_leads, AirtableError, increment_daily_log_field
 from deal_dispatch import dispatch_agreed_deal
 
 app = FastAPI(title="Mello Acquisitions Agent Tools")
@@ -77,13 +77,6 @@ class FinalFeeRequest(BaseModel):
     repair_cost: float
     agreed_price: float
     buyer_profit_pct: float = 0.10
-
-
-class WholetailRequest(BaseModel):
-    cmv: float
-    repair_cost: float
-    buyer_profit: float
-    wholesale_fee: float
 
 
 class LogCallRequest(BaseModel):
@@ -194,17 +187,6 @@ def calculate_final_fee_endpoint(req: FinalFeeRequest):
         repair_cost=req.repair_cost,
         agreed_price=req.agreed_price,
         buyer_profit_pct=req.buyer_profit_pct,
-    )
-
-
-@app.post("/calculate_wholetail")
-def calculate_wholetail_endpoint(req: WholetailRequest):
-    """Alternative calculation for higher-value / lighter-rehab deals."""
-    return wholetail_calculator(
-        cmv=req.cmv,
-        repair_cost=req.repair_cost,
-        buyer_profit=req.buyer_profit,
-        wholesale_fee=req.wholesale_fee,
     )
 
 
@@ -329,6 +311,15 @@ async def vapi_call_ended(request: Request):
 
     print(f"End-of-call report: phone={phone}, duration={duration}s, reason={ended_reason}")
 
+    # This was previously only printed and then discarded — now it accumulates
+    # into today's Daily Log record so the dashboard can compute a REAL,
+    # duration-based Vapi cost estimate instead of a flat per-call guess.
+    if duration is not None:
+        try:
+            increment_daily_log_field("call_seconds_today", duration)
+        except Exception as e:
+            print(f"Failed to record call duration for cost tracking: {e}")
+
     if not phone:
         return {"received": True, "warning": "no phone number in payload"}
 
@@ -357,20 +348,41 @@ async def vapi_call_ended(request: Request):
     return {"received": True}
 
 
+def _dispatch_and_record(address: str, lead_fields: dict, agreed_price: float):
+    """
+    Runs after the HTTP response has already gone back to Vapi — the call
+    keeps moving instead of sitting on a multi-second pause for docx
+    generation + SMTP login. Exceptions here can't be surfaced back to the
+    call anymore, so they're logged loudly and left visible on the record
+    for you to notice from the dashboard instead.
+    """
+    try:
+        dispatch_agreed_deal(lead_fields, agreed_price)
+        current_emails = lead_fields.get("#_emails", 0)
+        upsert_lead(address, {"#_emails": current_emails + 1})
+        print(f"Contract emailed successfully for {address}")
+    except Exception as e:
+        print(f"Contract dispatch FAILED for {address} (Agreed status still saved — handle manually): {e}")
+        try:
+            upsert_lead(address, {
+                "call_transcript_summary": (lead_fields.get("call_transcript_summary") or "")
+                + f"\n[Contract email failed to send: {e}]"
+            })
+        except Exception as inner_e:
+            print(f"Also failed to record the dispatch failure on the record: {inner_e}")
+
+
 @app.post("/flag_for_human_review")
-def flag_for_human_review(req: FlagReviewRequest):
+def flag_for_human_review(req: FlagReviewRequest, background_tasks: BackgroundTasks):
     """
     Called ONLY when a seller verbally agrees to a price. Marks the lead as
-    Agreed, then generates the filled purchase agreement and emails it to
-    YOU (not the seller) for review — see deal_dispatch.py. This is the
-    interim workflow while Box Sign's paid tier is on hold: it does NOT
-    send anything to the seller itself. You still review the attached
-    contract, add a signature field, and send it on yourself.
-
-    Contract generation/email is best-effort: if it fails (e.g. Mailgun
-    isn't configured yet), the "Agreed" status and deal details are still
-    saved to Airtable — you'd just need to notice it on the dashboard and
-    generate the contract manually instead of from your inbox.
+    Agreed, then queues contract generation + emailing it to YOU (not the
+    seller) as a BACKGROUND task — this endpoint returns to Vapi immediately
+    rather than making the live call wait several seconds for a docx render
+    and an SMTP login. See deal_dispatch.py. This is the interim workflow
+    while Box Sign's paid tier is on hold: it does NOT send anything to the
+    seller itself. You still review the attached contract, add a signature
+    field, and send it on yourself.
     """
     fields = {
         "status": "Agreed",
@@ -387,25 +399,13 @@ def flag_for_human_review(req: FlagReviewRequest):
 
     result = upsert_lead(req.address, fields)
 
-    contract_emailed = False
-    dispatch_error = None
-    try:
-        full_record = find_lead_record(req.address)
-        # Fall back to the fields we just wrote if the read-back somehow
-        # misses — dispatch should still have enough to work with either way.
-        lead_fields = full_record["fields"] if full_record else {**fields, "address": req.address}
-        dispatch_agreed_deal(lead_fields, req.agreed_price)
-        contract_emailed = True
-        current_emails = lead_fields.get("#_emails", 0)
-        upsert_lead(req.address, {"#_emails": current_emails + 1})
-    except Exception as e:
-        dispatch_error = str(e)
-        print(f"Contract dispatch failed (Agreed status still saved — handle manually): {e}")
+    full_record = find_lead_record(req.address)
+    lead_fields = full_record["fields"] if full_record else {**fields, "address": req.address}
+    background_tasks.add_task(_dispatch_and_record, req.address, lead_fields, req.agreed_price)
 
     return {
         "success": True,
         "airtable_record": result.get("id"),
         "needs_human_review": True,
-        "contract_emailed": contract_emailed,
-        "dispatch_error": dispatch_error,
+        "contract_dispatch": "queued",
     }
