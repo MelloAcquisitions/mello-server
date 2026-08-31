@@ -1,7 +1,7 @@
 """Render Cron Job: runs once at 7:30 AM. Schedule in Render: 30 7 * * *"""
 
 from lead_sourcing import get_compliant_leads
-from airtable_helpers import upsert_lead, AirtableError
+from airtable_helpers import upsert_lead, find_lead_record, AirtableError
 from orchestrator_lib import enrich_lead_with_valuation
 
 # Your specific target zones — add/remove markets here to focus on places
@@ -27,6 +27,21 @@ if __name__ == "__main__":
     for lead in new_leads:
         full_address = lead.get("address")
         if not full_address:
+            continue
+
+        # BatchData WILL surface the same property again on a later day if it
+        # still matches the quicklist filters (still absentee, still
+        # tax-delinquent, etc.) — this is expected, not a bug on their end.
+        # Without this check, re-processing it would blindly reset an
+        # existing lead's status back to "New", including ones already
+        # marked Opt Out, Rejected, or Exhausted — which for Opt Out
+        # specifically means re-contacting someone who explicitly asked to
+        # be removed. Skip entirely if the address already exists, before
+        # spending a RentCast/Zillapi lookup on it too.
+        existing = find_lead_record(full_address)
+        if existing:
+            print(f"  Skipping {full_address} — already in Airtable as status "
+                  f"'{existing['fields'].get('status', 'Unknown')}', not re-processing")
             continue
 
         try:

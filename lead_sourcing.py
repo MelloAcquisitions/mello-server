@@ -12,6 +12,17 @@ account or subscription needed.
 
 SETUP: same BATCHDATA_API_KEY environment variable as batchdata_lookup.py
 
+VERIFY ON FIRST REAL RUN: sessionId is now included on every request (see
+BATCHDATA_SESSION_ID below) specifically so BatchData excludes properties
+already delivered to you in a past request, avoiding being billed again for
+a property that still matches the same quicklist filters day after day.
+This is confirmed as a real BatchData feature, but if a property you KNOW
+was already returned yesterday shows up again after this change, the
+exclusion behavior may specifically require their v2 endpoint plus
+useCursorPagination rather than working on this v1 endpoint — flag that to
+me if you see it, and get the v2 endpoint details from BatchData support so
+I can migrate this properly.
+
 This is designed to plug into the 8am phase of the future orchestrator
 ("central brain") — for now it's a standalone script you can run manually
 or wire into a scheduled job later.
@@ -24,6 +35,17 @@ from airtable_helpers import increment_daily_log_field
 
 BATCHDATA_API_KEY = os.environ.get("BATCHDATA_API_KEY")
 BASE_URL = "https://api.batchdata.com/api/v1/property/search"
+
+# Persistent across EVERY run, forever — this is what makes BatchData's
+# session-based delivery exclude properties already returned to you in a
+# past request, so a still-matching property doesn't get billed again just
+# because it still qualifies for the same quicklist filters. Confirmed
+# field name: "sessionId" (BatchData's own support, per their docs on
+# search sessions / incremental delivery). The exact value doesn't matter —
+# it just needs to stay IDENTICAL across every request, forever. Do not
+# change this string once it's live, or you lose the delivery history tied
+# to it and start getting billed for repeats again.
+BATCHDATA_SESSION_ID = os.environ.get("BATCHDATA_SESSION_ID", "mello-acquisitions-daily-sourcing-v1")
 
 
 def get_daily_leads(
@@ -92,6 +114,7 @@ def get_daily_leads(
                 "take": limit,
                 "skip": skip,
                 "skipTrace": True,  # pulls phone numbers in the SAME call
+                "sessionId": BATCHDATA_SESSION_ID,  # excludes previously-delivered properties across ALL past requests using this session — this is the actual cost fix
             },
         }
 

@@ -1,4 +1,4 @@
-"""Render Cron Job: runs once at 7:30 AM. Schedule in Render: 30 7 * * *"""
+"""Render Cron Job: runs once at 8:00 AM. Schedule in Render: 0 8 * * *"""
 
 import os
 

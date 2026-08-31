@@ -19,7 +19,15 @@ PROPOSED_UPDATES_URL = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{PROPOSE
 def has_unresolved_proposal() -> bool:
     """True if there's already a Pending or Approved-but-not-yet-applied
     proposal sitting there — prevents piling up a new draft every night if
-    you haven't gotten to reviewing yesterday's yet."""
+    you haven't gotten to reviewing yesterday's yet.
+
+    TO DENY A PROPOSAL without blocking future ones: change its status in
+    Airtable to anything other than "Pending" or "Approved" — e.g.
+    "Rejected". This filter only matches those two exact values, so any
+    other status immediately unblocks the next night's draft. If your
+    "status" column is a single-select field, add "Rejected" as an option;
+    if it's plain text, this already works with no setup at all.
+    """
     headers = {"Authorization": f"Bearer {AIRTABLE_API_KEY}"}
     params = {"filterByFormula": "OR({status}='Pending', {status}='Approved')"}
     response = requests.get(PROPOSED_UPDATES_URL, headers=headers, params=params, timeout=15)

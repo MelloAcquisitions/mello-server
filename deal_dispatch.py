@@ -163,6 +163,37 @@ def email_contract_to_owner(contract_path: str, lead_fields: dict, agreed_price:
         server.sendmail(EMAIL_USERNAME, [OWNER_EMAIL], msg.as_string())
 
 
+def notify_human_call_request(lead_fields: dict) -> None:
+    """
+    Fires when a seller explicitly asks to speak with a person instead of
+    continuing with the AI. Unlike dispatch_agreed_deal(), this sends no
+    attachment — just a quick heads-up, since this is time-sensitive (a
+    seller waiting on a callback) and previously had NO notification at all,
+    only a silent Airtable status change you'd have to notice yourself.
+    """
+    if not all([EMAIL_USERNAME, EMAIL_PASSWORD, OWNER_EMAIL]):
+        raise RuntimeError("EMAIL_USERNAME, EMAIL_PASSWORD, or OWNER_EMAIL not set")
+
+    address = lead_fields.get("address", "Unknown address")
+    body = (
+        f"A seller asked to speak with a person directly during today's call — "
+        f"this needs a callback.\n\n"
+        f"Address: {address}\n"
+        f"Seller: {lead_fields.get('owner_name', 'Unknown')}\n"
+        f"Phone: {lead_fields.get('phone', '-')}\n"
+        f"Notes: {lead_fields.get('call_transcript_summary', '')}\n"
+    )
+    msg = MIMEText(body, "plain")
+    msg["From"] = EMAIL_USERNAME
+    msg["To"] = OWNER_EMAIL
+    msg["Subject"] = f"Human callback requested — {address}"
+
+    with smtplib.SMTP(EMAIL_HOST, EMAIL_PORT) as server:
+        server.starttls()
+        server.login(EMAIL_USERNAME, EMAIL_PASSWORD)
+        server.sendmail(EMAIL_USERNAME, [OWNER_EMAIL], msg.as_string())
+
+
 def dispatch_agreed_deal(lead_fields: dict, agreed_price: float) -> dict:
     """
     The one function to call the moment a deal is agreed: builds the

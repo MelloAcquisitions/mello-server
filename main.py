@@ -37,7 +37,7 @@ from rentcast_lookup import (
 from zillapi_lookup import get_zillow_valuation, extract_zestimate
 from dashboard import router as dashboard_router
 from airtable_helpers import find_lead_record, upsert_lead, query_leads, AirtableError, increment_daily_log_field
-from deal_dispatch import dispatch_agreed_deal
+from deal_dispatch import dispatch_agreed_deal, notify_human_call_request
 
 app = FastAPI(title="Mello Acquisitions Agent Tools")
 app.include_router(dashboard_router)
@@ -191,13 +191,18 @@ def calculate_final_fee_endpoint(req: FinalFeeRequest):
 
 
 @app.post("/log_call_outcome")
-def log_call_outcome(req: LogCallRequest):
+def log_call_outcome(req: LogCallRequest, background_tasks: BackgroundTasks):
     """
     Writes (or updates) the lead's record in Airtable. Called at the end of
     EVERY call, regardless of outcome — including opt-outs and rejections.
 
     Automatically increments the #_calls column by 1 each time this fires,
     since one call outcome logged = one call made.
+
+    If status is "Human Call", also fires an email notification in the
+    background — this was previously silent, only visible if you happened
+    to check the dashboard, which doesn't fit a time-sensitive callback
+    request.
 
     NOTE: writes to an "offer_amount" field — this column must exist in
     your Airtable table (currency type) or this will fail. If you haven't
@@ -224,7 +229,21 @@ def log_call_outcome(req: LogCallRequest):
         fields["email"] = req.email
 
     result = upsert_lead(req.address, fields)
+
+    if req.status == "Human Call":
+        lead_fields_for_notify = {**(existing_record["fields"] if existing_record else {}), **fields, "address": req.address}
+        background_tasks.add_task(_safe_notify_human_call, req.address, lead_fields_for_notify)
+
     return {"success": True, "airtable_record": result.get("id"), "call_count": current_call_count + 1}
+
+
+def _safe_notify_human_call(address: str, lead_fields: dict):
+    try:
+        notify_human_call_request(lead_fields)
+        print(f"Human-call notification sent for {address}")
+    except Exception as e:
+        print(f"Failed to send human-call notification for {address} (status still saved): {e}")
+
 
 
 @app.post("/inbound_email")
