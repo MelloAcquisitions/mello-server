@@ -68,7 +68,7 @@ OWNER_EMAIL = _clean_credential(os.environ.get("OWNER_EMAIL"))
 
 BUYER_NAME = os.environ.get("BUYER_NAME", "Mello Acquisitions LLC")
 BUYER_PHONE = os.environ.get("BUYER_PHONE", "")
-DEFAULT_TITLE_COMPANY = os.environ.get("DEFAULT_TITLE_COMPANY", "TBD — confirm with title company")
+DEFAULT_TITLE_COMPANY = os.environ.get("DEFAULT_TITLE_COMPANY", "TBD")
 ACCEPTANCE_WINDOW_DAYS = int(os.environ.get("ACCEPTANCE_WINDOW_DAYS", 5))
 CLOSING_WINDOW_DAYS = int(os.environ.get("CLOSING_WINDOW_DAYS", 30))
 

@@ -23,7 +23,7 @@ TEST_ADDRESS = "6506 Clubway Ln"
 TEST_CITY = "Austin"
 TEST_STATE = "TX"
 TEST_ZIP = "78745"
-TEST_PHONE = "+1XXXXXXXXXX"  # replace with YOUR OWN number to test safely
+TEST_PHONE = "+19565177010"  # replace with YOUR OWN number to test safely
 
 if __name__ == "__main__":
     print("Step 1: Pre-fetching valuation data...")
