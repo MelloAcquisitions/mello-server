@@ -137,7 +137,7 @@ def get_costs_json(authorized: bool = Depends(check_password)):
       tier (no current cost), so its future paid-tier cost is shown
       separately under "upcoming_costs" rather than inflating today's total.
     """
-    VAPI_COST_PER_MINUTE = float(os.environ.get("VAPI_COST_PER_MINUTE", 0.0722))  # derived: $0.26 / 3.6 min (3m36s)
+    VAPI_COST_PER_MINUTE = float(os.environ.get("VAPI_COST_PER_MINUTE", 0.0744))  # averaged from 2 real Telnyx-era calls: $0.44/341s and $0.22/185s
     # BatchData bills per property record returned, plus extra per skip-trace
     # match — NOT per API call (confirmed from their docs; a flat per-call
     # rate was disproven by real data ranging $0.006 to $1.20 per call on
