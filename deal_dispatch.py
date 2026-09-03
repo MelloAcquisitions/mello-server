@@ -163,30 +163,58 @@ def email_contract_to_owner(contract_path: str, lead_fields: dict, agreed_price:
         server.sendmail(EMAIL_USERNAME, [OWNER_EMAIL], msg.as_string())
 
 
-def notify_human_call_request(lead_fields: dict) -> None:
+def notify_attention_needed(lead_fields: dict, status: str) -> None:
     """
-    Fires when a seller explicitly asks to speak with a person instead of
-    continuing with the AI. Unlike dispatch_agreed_deal(), this sends no
-    attachment — just a quick heads-up, since this is time-sensitive (a
-    seller waiting on a callback) and previously had NO notification at all,
-    only a silent Airtable status change you'd have to notice yourself.
+    Fires for the three call outcomes that genuinely warrant your attention —
+    "Human Call" (seller asked for a person), "Offer Made" (a real number is
+    on the table, close to a deal), and "Priority Follow-up" (weak number
+    but a strong, specific reason to sell — worth handling personally rather
+    than letting the standard retry schedule handle it). Deliberately does
+    NOT fire for every outcome — a dead lead or a routine "check back later"
+    doesn't need to interrupt you, only ones that actually do.
     """
     if not all([EMAIL_USERNAME, EMAIL_PASSWORD, OWNER_EMAIL]):
         raise RuntimeError("EMAIL_USERNAME, EMAIL_PASSWORD, or OWNER_EMAIL not set")
 
     address = lead_fields.get("address", "Unknown address")
-    body = (
-        f"A seller asked to speak with a person directly during today's call — "
-        f"this needs a callback.\n\n"
-        f"Address: {address}\n"
-        f"Seller: {lead_fields.get('owner_name', 'Unknown')}\n"
-        f"Phone: {lead_fields.get('phone', '-')}\n"
-        f"Notes: {lead_fields.get('call_transcript_summary', '')}\n"
-    )
-    msg = MIMEText(body, "plain")
+    arv = lead_fields.get("arv") or 0
+    offer_amount = lead_fields.get("offer_amount")
+    repair_estimate = lead_fields.get("repair_estimate") or 0
+    mao_floor = lead_fields.get("mao_floor")
+    next_contact_date = lead_fields.get("next_contact_date")
+
+    subject_map = {
+        "Human Call": f"Human callback requested — {address}",
+        "Offer Made": f"Close to a deal — {address}",
+        "Priority Follow-up": f"Priority lead, needs your touch — {address}",
+    }
+    intro_map = {
+        "Human Call": "A seller asked to speak with a person directly during today's call — this needs a callback.",
+        "Offer Made": "A real number came up on today's call and it's close to a deal — worth following up while it's warm.",
+        "Priority Follow-up": "The number wasn't close, but this seller gave a strong, specific reason to sell — worth your personal handling rather than the standard retry schedule.",
+    }
+
+    body_lines = [
+        intro_map.get(status, "This call needs your attention."),
+        "",
+        f"Address: {address}",
+        f"Seller: {lead_fields.get('owner_name', 'Unknown')}",
+        f"Phone: {lead_fields.get('phone', '-')}",
+        f"ARV: ${arv:,.0f}",
+        f"Repair estimate: ${repair_estimate:,.0f}",
+    ]
+    if offer_amount is not None:
+        body_lines.append(f"Seller's number / offer discussed: ${offer_amount:,.0f}")
+    if mao_floor is not None:
+        body_lines.append(f"Your ceiling (mao_floor): ${mao_floor:,.0f}")
+    if next_contact_date:
+        body_lines.append(f"Scheduled next contact: {next_contact_date}")
+    body_lines.append(f"Notes: {lead_fields.get('call_transcript_summary', '')}")
+
+    msg = MIMEText("\n".join(body_lines), "plain")
     msg["From"] = EMAIL_USERNAME
     msg["To"] = OWNER_EMAIL
-    msg["Subject"] = f"Human callback requested — {address}"
+    msg["Subject"] = subject_map.get(status, f"Lead needs attention — {address}")
 
     with smtplib.SMTP(EMAIL_HOST, EMAIL_PORT) as server:
         server.starttls()

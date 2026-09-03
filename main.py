@@ -37,7 +37,7 @@ from rentcast_lookup import (
 from zillapi_lookup import get_zillow_valuation, extract_zestimate
 from dashboard import router as dashboard_router
 from airtable_helpers import find_lead_record, upsert_lead, query_leads, AirtableError, increment_daily_log_field
-from deal_dispatch import dispatch_agreed_deal, notify_human_call_request
+from deal_dispatch import dispatch_agreed_deal, notify_attention_needed
 
 app = FastAPI(title="Mello Acquisitions Agent Tools")
 app.include_router(dashboard_router)
@@ -82,13 +82,16 @@ class FinalFeeRequest(BaseModel):
 class LogCallRequest(BaseModel):
     address: str
     status: str  # Must exactly match your Airtable single-select options (case-sensitive):
-                 # New | Contacted | Qualified | Offer Made | Agreed | Rejected | Opt Out | Human Call | Exhausted
+                 # New | Contacted | Qualified | Offer Made | Agreed | Rejected | Opt Out | Human Call | Priority Follow-up | Exhausted | Closed
+                 # NOTE: "Closed" is never set by the AI or this API — it's set manually
+                 # by you once a deal actually funds. Listed here only for completeness.
     notes: Optional[str] = ""
     offer_amount: Optional[float] = None
     arv: Optional[float] = None
     repair_estimate: Optional[float] = None
     mao_floor: Optional[float] = None
     email: Optional[str] = None
+    next_contact_date: Optional[str] = None  # ISO date "2027-02-15" — set when the seller gave a real future timeframe ("check back in 6 months")
 
 
 class FlagReviewRequest(BaseModel):
@@ -199,10 +202,13 @@ def log_call_outcome(req: LogCallRequest, background_tasks: BackgroundTasks):
     Automatically increments the #_calls column by 1 each time this fires,
     since one call outcome logged = one call made.
 
-    If status is "Human Call", also fires an email notification in the
-    background — this was previously silent, only visible if you happened
-    to check the dashboard, which doesn't fit a time-sensitive callback
-    request.
+    Email notification fires ONLY for statuses that genuinely need your
+    attention — "Human Call" (seller asked for a person), "Offer Made" (a
+    real number is on the table, close to a deal), and "Priority Follow-up"
+    (weak number but strong, specific reason to sell — worth your personal
+    touch). Every other outcome (New, Contacted, Qualified, Rejected, Opt
+    Out, Exhausted) is logged silently — deliberately not emailed, so you
+    only ever see leads that actually warrant your time.
 
     NOTE: writes to an "offer_amount" field — this column must exist in
     your Airtable table (currency type) or this will fail. If you haven't
@@ -227,20 +233,23 @@ def log_call_outcome(req: LogCallRequest, background_tasks: BackgroundTasks):
         fields["mao_floor"] = req.mao_floor
     if req.email is not None:
         fields["email"] = req.email
+    if req.next_contact_date is not None:
+        fields["next_contact_date"] = req.next_contact_date
 
     result = upsert_lead(req.address, fields)
 
-    if req.status == "Human Call":
+    NOTIFY_STATUSES = {"Human Call", "Offer Made", "Priority Follow-up"}
+    if req.status in NOTIFY_STATUSES:
         lead_fields_for_notify = {**(existing_record["fields"] if existing_record else {}), **fields, "address": req.address}
-        background_tasks.add_task(_safe_notify_human_call, req.address, lead_fields_for_notify)
+        background_tasks.add_task(_safe_notify_attention_needed, req.address, lead_fields_for_notify, req.status)
 
     return {"success": True, "airtable_record": result.get("id"), "call_count": current_call_count + 1}
 
 
-def _safe_notify_human_call(address: str, lead_fields: dict):
+def _safe_notify_attention_needed(address: str, lead_fields: dict, status: str):
     try:
-        notify_human_call_request(lead_fields)
-        print(f"Human-call notification sent for {address}")
+        notify_attention_needed(lead_fields, status)
+        print(f"Attention-needed notification sent for {address} (status: {status})")
     except Exception as e:
         print(f"Failed to send human-call notification for {address} (status still saved): {e}")
 

@@ -103,8 +103,11 @@ def get_productivity_json(authorized: bool = Depends(check_password)):
     rejected = status_counts.get("Rejected", 0)
     opt_out = status_counts.get("Opt Out", 0)
     exhausted = status_counts.get("Exhausted", 0)
+    priority_follow_up = status_counts.get("Priority Follow-up", 0)
+    closed = status_counts.get("Closed", 0)  # set manually by you once a deal actually funds — see dashboard notes
 
     conversion_rate = round((agreed / total_leads * 100), 1) if total_leads else 0
+    closed_rate = round((closed / total_leads * 100), 1) if total_leads else 0
 
     return {
         "total_leads": total_leads,
@@ -114,8 +117,11 @@ def get_productivity_json(authorized: bool = Depends(check_password)):
         "rejected": rejected,
         "opt_out": opt_out,
         "exhausted": exhausted,
+        "priority_follow_up": priority_follow_up,
+        "closed": closed,
+        "closed_rate_pct": closed_rate,
         "conversion_rate_pct": conversion_rate,
-        "note": "Day/week/month call breakdowns require a timestamped call log, not yet built — these are all-time totals.",
+        "note": "Day/week/month call breakdowns require a timestamped call log, not yet built — these are all-time totals. \"Conversion rate\" is Agreed as a share of all leads (a real price was reached); \"closed_rate_pct\" is deals that actually funded, which only you can mark — the system has no way to know a deal closed on its own.",
     }
 
 
@@ -361,6 +367,9 @@ def dashboard_page(authorized: bool = Depends(check_password)):
   .badge-qualified { background: #60a5fa20; color: #60a5fa; }
   .badge-offer-made { background: #facc1520; color: #facc15; }
   .badge-contacted { background: #a78bfa20; color: #a78bfa; }
+  .badge-priority { background: #f8717120; color: #f87171; }
+  .badge-human-call { background: #fb923c20; color: #fb923c; }
+  .badge-closed { background: #34d39920; color: #34d399; }
   .badge-default { background: #99999920; color: #999; }
 
   .detail { display: none; margin-top: 12px; padding-top: 12px; border-top: 1px solid #333; font-size: 13px; }
@@ -427,7 +436,7 @@ def dashboard_page(authorized: bool = Depends(check_password)):
   </div>
 
 <script>
-const ACTIVE_STATUSES = ['Contacted', 'Qualified', 'Offer Made', 'Agreed'];
+const ACTIVE_STATUSES = ['Contacted', 'Qualified', 'Offer Made', 'Agreed', 'Priority Follow-up', 'Human Call'];
 let allLeads = [];
 let currentFilter = 'active';
 
@@ -446,7 +455,7 @@ document.querySelectorAll('.top-tab').forEach(tab => {
 });
 
 function badgeClass(status) {
-  const map = { 'Agreed': 'agreed', 'Qualified': 'qualified', 'Offer Made': 'offer-made', 'Contacted': 'contacted' };
+  const map = { 'Agreed': 'agreed', 'Qualified': 'qualified', 'Offer Made': 'offer-made', 'Contacted': 'contacted', 'Priority Follow-up': 'priority', 'Human Call': 'human-call', 'Closed': 'closed' };
   return 'badge-' + (map[status] || 'default');
 }
 
@@ -599,10 +608,13 @@ async function loadProductivity() {
         <div class="stat-card"><div class="num">${data.total_leads}</div><div class="label">Total leads</div></div>
         <div class="stat-card"><div class="num">${data.total_calls_all_time}</div><div class="label">Total calls</div></div>
         <div class="stat-card"><div class="num">${data.agreed}</div><div class="label">Agreed</div></div>
+        <div class="stat-card"><div class="num">${data.closed}</div><div class="label">Actually Closed</div></div>
+        <div class="stat-card"><div class="num">${data.priority_follow_up}</div><div class="label">Priority Follow-up</div></div>
         <div class="stat-card"><div class="num">${data.rejected}</div><div class="label">Rejected</div></div>
         <div class="stat-card"><div class="num">${data.opt_out}</div><div class="label">Opt Out</div></div>
         <div class="stat-card"><div class="num">${data.exhausted}</div><div class="label">Exhausted</div></div>
-        <div class="stat-card"><div class="num">${data.conversion_rate_pct}%</div><div class="label">Conversion rate</div></div>
+        <div class="stat-card"><div class="num">${data.conversion_rate_pct}%</div><div class="label">Agreed rate</div></div>
+        <div class="stat-card"><div class="num">${data.closed_rate_pct}%</div><div class="label">Actually closed rate</div></div>
       </div>
       <div class="note-box">${data.note}</div>
     `;

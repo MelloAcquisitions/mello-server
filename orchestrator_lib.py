@@ -18,8 +18,9 @@ from zillapi_lookup import get_zillow_valuation, extract_zestimate
 
 VAPI_API_KEY = os.environ.get("VAPI_API_KEY")
 
-MAX_CALLS_PER_DISPATCH_RUN = 3  # throttle per run — simple, honest concurrency
-                                 # control rather than real-time tracking
+TARGET_CONCURRENT_CALLS = 3  # start conservative for real-world testing; raise
+                             # toward your account's actual concurrency limit
+                             # (10, per Vapi's subscriptionLimits) once proven out
 
 
 # ---------------------------------------------------------------------------
@@ -44,9 +45,21 @@ def _parse_date_safely(date_string: str) -> date:
     return date.fromisoformat(date_string[:10])
 
 
-def is_lead_exhausted(date_created: str, call_count: int) -> bool:
-    """True if this lead has used up its full retry schedule — either hit
-    the attempt cap, or run past the final cutoff day."""
+def is_lead_exhausted(date_created: str, call_count: int, next_contact_date: str = None) -> bool:
+    """
+    True if this lead has used up its full retry schedule — either hit the
+    attempt cap, or run past the final cutoff day.
+
+    next_contact_date: if a seller gave a real future timeframe ("check back
+    in 6 months"), this OVERRIDES the normal 30-day cutoff entirely — without
+    this, a genuinely promising lead would get silently marked Exhausted and
+    dropped forever, months before the scheduled callback ever happens. Set
+    via the "next_contact_date" field on the Airtable record.
+    """
+    if next_contact_date:
+        # A real scheduled date means this lead is deliberately being held,
+        # not abandoned — never exhaust it while a future date is pending.
+        return False
     if call_count >= MAX_ATTEMPTS:
         return True
     created = _parse_date_safely(date_created)
@@ -54,9 +67,20 @@ def is_lead_exhausted(date_created: str, call_count: int) -> bool:
     return days_elapsed > CALL_SCHEDULE_DAYS[-1]
 
 
-def is_retry_due(date_created: str, call_count: int) -> bool:
-    """True if enough time has passed since lead creation to allow the
-    NEXT attempt (call_count is how many attempts have happened so far)."""
+def is_retry_due(date_created: str, call_count: int, next_contact_date: str = None) -> bool:
+    """
+    True if enough time has passed since lead creation to allow the NEXT
+    attempt (call_count is how many attempts have happened so far).
+
+    next_contact_date: if set, this REPLACES the normal decaying schedule —
+    the lead is due exactly on that date, not before, regardless of
+    call_count or the default cadence. This is what makes "check back in 6
+    months" actually mean something instead of either being retried every
+    few days by the normal schedule or dropped as Exhausted.
+    """
+    if next_contact_date:
+        scheduled = _parse_date_safely(next_contact_date)
+        return date.today() >= scheduled
     if is_lead_exhausted(date_created, call_count):
         return False  # never due if already exhausted, regardless of schedule index
     created = _parse_date_safely(date_created)
