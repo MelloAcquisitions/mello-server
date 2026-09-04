@@ -1,6 +1,6 @@
 """
-Render Cron Job: runs once at 9:30 PM (after evening-wrap). Schedule in
-Render: 30 21 * * *
+Render Cron Job: 9:30 PM Monterrey time (after evening-wrap).
+Schedule in Render (UTC): 30 3 * * *
 
 Closes a real gap: cron_draft_improvements.py only analyzes CONVERSATION
 quality (objection handling, tone) — it has no visibility into TOOL-LEVEL

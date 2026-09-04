@@ -48,15 +48,30 @@ def _fetch_all_leads():
     if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
         raise HTTPException(500, "AIRTABLE_API_KEY or AIRTABLE_BASE_ID not set on the dashboard service")
 
+    # Airtable returns at most 100 records per page — without following the
+    # offset cursor, every count and stat on this dashboard would silently
+    # be wrong (capped at the first page) once the table grows past 100 rows,
+    # with no error or warning to indicate it.
     headers = {"Authorization": f"Bearer {AIRTABLE_API_KEY}"}
-    response = requests.get(AIRTABLE_URL, headers=headers, timeout=15)
-    if not response.ok:
-        print(f"Airtable error in dashboard fetch ({response.status_code}): {response.text}")
-        raise HTTPException(
-            status_code=response.status_code,
-            detail=f"Airtable error: {response.text}",
-        )
-    return response.json().get("records", [])
+    records = []
+    params = {"pageSize": 100}
+
+    while True:
+        response = requests.get(AIRTABLE_URL, headers=headers, params=params, timeout=15)
+        if not response.ok:
+            print(f"Airtable error in dashboard fetch ({response.status_code}): {response.text}")
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=f"Airtable error: {response.text}",
+            )
+        payload = response.json()
+        records.extend(payload.get("records", []))
+        offset = payload.get("offset")
+        if not offset:
+            break
+        params["offset"] = offset
+
+    return records
 
 
 @router.get("/api/dashboard/leads")

@@ -15,15 +15,33 @@ Interim workflow this supports:
      "email the owner" step for box_sign.py's "send directly to seller for
      e-signature" flow — build_deal_dict() below stays the same either way.
 
-SETUP: sends via plain SMTP — your existing email account (Gmail, Outlook,
-etc.), no new third-party service or signup needed. Set:
-  EMAIL_HOST        (e.g. smtp.gmail.com)
-  EMAIL_PORT        (e.g. 587 — default below if unset)
-  EMAIL_USERNAME    (the address you're sending FROM — e.g. you@gmail.com)
-  EMAIL_PASSWORD    (an APP PASSWORD, not your normal login password —
-                     see the deployment steps for how to generate one)
-  OWNER_EMAIL       (where the contract + deal summary should land — can be
-                     the same address as EMAIL_USERNAME)
+EMAIL TRANSPORT — CHANGED from smtplib to Resend's HTTPS API:
+Render's free-tier web services block ALL outbound SMTP ports (25, 465,
+587) as of Sept 2025 — confirmed via Render's own changelog. Every send
+was failing with [Errno 101] Network is unreachable, a low-level network
+block, not an auth or code problem. Port 443 (plain HTTPS) is NOT blocked,
+so Resend's API (or any transactional-email HTTP API) sidesteps it
+entirely. If you ever move off Render's free tier, this file doesn't need
+to change back — HTTPS works everywhere SMTP does, not the reverse.
+
+SETUP:
+  RESEND_API_KEY    from https://resend.com/api-keys
+  OWNER_EMAIL       where the contract + deal summary should land
+  RESEND_FROM       the "from" address Resend sends as. On Resend's free
+                     tier with no verified domain, this MUST be exactly
+                     "onboarding@resend.dev" — trying to send from your own
+                     address without domain verification will fail. Once
+                     you verify a domain in Resend, you can use a real
+                     address here (e.g. deals@youracquisitions.com).
+                     Defaults to "onboarding@resend.dev" if unset.
+
+HONEST LIMITATION — Resend sandbox mode: until you verify a domain in
+Resend, their API will only deliver to the email address you signed up to
+Resend with. If OWNER_EMAIL doesn't match your Resend account's own email,
+sends will silently succeed at the API level but never arrive. Verify this
+by checking Resend's dashboard "Emails" log after your first test send —
+it'll show "delivered" or the actual rejection reason, which is more
+visibility than smtplib ever gave you.
 
 Optional, all have reasonable defaults:
   BUYER_NAME, BUYER_PHONE, DEFAULT_TITLE_COMPANY,
@@ -35,42 +53,64 @@ placeholders in the generated contract — you (or your title company) still
 need to fill those in before anything is signature-ready.
 """
 
+import base64
 import os
-import re
-import smtplib
 from datetime import date, timedelta
-from email.mime.base import MIMEBase
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from email import encoders
+
+import requests
 
 from contract_generator import generate_contract
 
-
-def _clean_credential(value):
-    """
-    Strips ALL whitespace, including non-breaking spaces (\\xa0) — Google's
-    app-password page displays the password with spaces for readability,
-    and copy-pasting from a browser sometimes turns those into non-breaking
-    spaces rather than normal ones, which smtplib's login step can't encode
-    as ASCII. Stripping here means it doesn't matter how it was pasted.
-    """
-    if value is None:
-        return None
-    return re.sub(r"\s+", "", value)
-
-
-EMAIL_HOST = os.environ.get("EMAIL_HOST", "smtp.gmail.com")
-EMAIL_PORT = int(os.environ.get("EMAIL_PORT", 587))
-EMAIL_USERNAME = _clean_credential(os.environ.get("EMAIL_USERNAME"))
-EMAIL_PASSWORD = _clean_credential(os.environ.get("EMAIL_PASSWORD"))
-OWNER_EMAIL = _clean_credential(os.environ.get("OWNER_EMAIL"))
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY")
+RESEND_FROM = os.environ.get("RESEND_FROM", "onboarding@resend.dev")
+OWNER_EMAIL = os.environ.get("OWNER_EMAIL")
+RESEND_URL = "https://api.resend.com/emails"
 
 BUYER_NAME = os.environ.get("BUYER_NAME", "Mello Acquisitions LLC")
 BUYER_PHONE = os.environ.get("BUYER_PHONE", "")
 DEFAULT_TITLE_COMPANY = os.environ.get("DEFAULT_TITLE_COMPANY", "TBD")
 ACCEPTANCE_WINDOW_DAYS = int(os.environ.get("ACCEPTANCE_WINDOW_DAYS", 5))
 CLOSING_WINDOW_DAYS = int(os.environ.get("CLOSING_WINDOW_DAYS", 30))
+
+
+class EmailError(Exception):
+    """Raised when Resend's API rejects a send — kept as a plain exception,
+    same pattern as AirtableError, so callers can catch it specifically if
+    they ever want to (main.py currently just logs and moves on)."""
+    pass
+
+
+def _send_via_resend(subject: str, body_text: str, attachment_path: str = None) -> None:
+    """
+    Sends one email through Resend's HTTPS API. Raises EmailError on any
+    non-2xx response so the caller's existing try/except logging still
+    works exactly as before — only the transport underneath changed.
+    """
+    if not all([RESEND_API_KEY, OWNER_EMAIL]):
+        raise EmailError("RESEND_API_KEY or OWNER_EMAIL not set")
+
+    payload = {
+        "from": RESEND_FROM,
+        "to": [OWNER_EMAIL],
+        "subject": subject,
+        "text": body_text,
+    }
+
+    if attachment_path:
+        with open(attachment_path, "rb") as f:
+            encoded = base64.b64encode(f.read()).decode("ascii")
+        payload["attachments"] = [{
+            "filename": os.path.basename(attachment_path),
+            "content": encoded,
+        }]
+
+    headers = {
+        "Authorization": f"Bearer {RESEND_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    response = requests.post(RESEND_URL, headers=headers, json=payload, timeout=20)
+    if not response.ok:
+        raise EmailError(f"Resend API error ({response.status_code}): {response.text}")
 
 
 def _build_full_address(lead_fields: dict) -> str:
@@ -113,13 +153,10 @@ def build_deal_dict(lead_fields: dict, agreed_price: float) -> dict:
 
 def email_contract_to_owner(contract_path: str, lead_fields: dict, agreed_price: float) -> None:
     """
-    Sends the generated contract to YOUR inbox (not the seller) via plain
-    SMTP, with the deal's key facts in the body so you can review at a
-    glance before adding a signature field and sending it on yourself.
+    Sends the generated contract to YOUR inbox (not the seller) via Resend,
+    with the deal's key facts in the body so you can review at a glance
+    before adding a signature field and sending it on yourself.
     """
-    if not all([EMAIL_USERNAME, EMAIL_PASSWORD, OWNER_EMAIL]):
-        raise RuntimeError("EMAIL_USERNAME, EMAIL_PASSWORD, or OWNER_EMAIL not set")
-
     address = lead_fields.get("address", "Unknown address")
     seller_email = lead_fields.get("email") or "NOT CAPTURED — get this before forwarding the contract"
     arv = lead_fields.get("arv") or 0
@@ -142,25 +179,11 @@ def email_contract_to_owner(contract_path: str, lead_fields: dict, agreed_price:
         f"before sending it to the seller."
     )
 
-    msg = MIMEMultipart()
-    msg["From"] = EMAIL_USERNAME
-    msg["To"] = OWNER_EMAIL
-    msg["Subject"] = f"Contract ready for review — {address}"
-    msg.attach(MIMEText(body, "plain"))
-
-    with open(contract_path, "rb") as f:
-        part = MIMEBase("application", "octet-stream")
-        part.set_payload(f.read())
-    encoders.encode_base64(part)
-    part.add_header(
-        "Content-Disposition", f'attachment; filename="{os.path.basename(contract_path)}"'
+    _send_via_resend(
+        subject=f"Contract ready for review — {address}",
+        body_text=body,
+        attachment_path=contract_path,
     )
-    msg.attach(part)
-
-    with smtplib.SMTP(EMAIL_HOST, EMAIL_PORT) as server:
-        server.starttls()
-        server.login(EMAIL_USERNAME, EMAIL_PASSWORD)
-        server.sendmail(EMAIL_USERNAME, [OWNER_EMAIL], msg.as_string())
 
 
 def notify_attention_needed(lead_fields: dict, status: str) -> None:
@@ -173,9 +196,6 @@ def notify_attention_needed(lead_fields: dict, status: str) -> None:
     NOT fire for every outcome — a dead lead or a routine "check back later"
     doesn't need to interrupt you, only ones that actually do.
     """
-    if not all([EMAIL_USERNAME, EMAIL_PASSWORD, OWNER_EMAIL]):
-        raise RuntimeError("EMAIL_USERNAME, EMAIL_PASSWORD, or OWNER_EMAIL not set")
-
     address = lead_fields.get("address", "Unknown address")
     arv = lead_fields.get("arv") or 0
     offer_amount = lead_fields.get("offer_amount")
@@ -211,15 +231,10 @@ def notify_attention_needed(lead_fields: dict, status: str) -> None:
         body_lines.append(f"Scheduled next contact: {next_contact_date}")
     body_lines.append(f"Notes: {lead_fields.get('call_transcript_summary', '')}")
 
-    msg = MIMEText("\n".join(body_lines), "plain")
-    msg["From"] = EMAIL_USERNAME
-    msg["To"] = OWNER_EMAIL
-    msg["Subject"] = subject_map.get(status, f"Lead needs attention — {address}")
-
-    with smtplib.SMTP(EMAIL_HOST, EMAIL_PORT) as server:
-        server.starttls()
-        server.login(EMAIL_USERNAME, EMAIL_PASSWORD)
-        server.sendmail(EMAIL_USERNAME, [OWNER_EMAIL], msg.as_string())
+    _send_via_resend(
+        subject=subject_map.get(status, f"Lead needs attention — {address}"),
+        body_text="\n".join(body_lines),
+    )
 
 
 def dispatch_agreed_deal(lead_fields: dict, agreed_price: float) -> dict:

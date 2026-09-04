@@ -1,4 +1,4 @@
-"""Render Cron Job: runs every 15 min, 8am-9pm. Schedule in Render: */15 8-20 * * *"""
+"""Render Cron Job: every 15 min, 8am-9pm Monterrey time. Schedule in Render (UTC): */15 14-23,0-2 * * *"""
 
 import os
 
@@ -64,7 +64,8 @@ if __name__ == "__main__":
             upsert_lead(address, {"status": "Exhausted"})
             continue
 
-        if not is_retry_due(date_created, call_count, next_contact_date):
+        if not is_retry_due(date_created, call_count, next_contact_date,
+                            status=fields.get("status"), last_call_date=fields.get("last_call_date")):
             print(f"  Skipping {address} — not due for next attempt yet per retry schedule")
             continue
 

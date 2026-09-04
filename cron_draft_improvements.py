@@ -1,4 +1,4 @@
-"""Render Cron Job: runs once at 10:00 PM. Schedule in Render: 0 22 * * *"""
+"""Render Cron Job: 10:00 PM Monterrey time. Schedule in Render (UTC): 0 4 * * *"""
 
 import os
 from datetime import datetime, timedelta

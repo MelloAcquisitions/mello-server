@@ -1,4 +1,4 @@
-"""Render Cron Job: runs once at 8:00 AM. Schedule in Render: 0 8 * * *"""
+"""Render Cron Job: 8:00 AM Monterrey time. Schedule in Render (UTC): 0 14 * * *"""
 
 import os
 

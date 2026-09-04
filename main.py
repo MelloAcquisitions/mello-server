@@ -217,12 +217,21 @@ def log_call_outcome(req: LogCallRequest, background_tasks: BackgroundTasks):
     existing_record = find_lead_record(req.address)
     current_call_count = existing_record["fields"].get("#_calls", 0) if existing_record else 0
 
+    # DO NOT increment #_calls here when the record already exists.
+    # cron_dispatch_calls.py already incremented it at the moment the call
+    # was triggered. Incrementing again here would count every ANSWERED call
+    # as two attempts — burning through the retry schedule twice as fast as
+    # intended and inflating every call statistic on the dashboard.
+    # Only set it for a brand-new record (e.g. a manually-triggered test
+    # call for an address that isn't in the table yet), where nothing
+    # incremented it beforehand.
     fields = {
         "status": req.status,
         "call_transcript_summary": req.notes,
         "last_call_date": __import__("datetime").date.today().isoformat(),
-        "#_calls": current_call_count + 1,
     }
+    if not existing_record:
+        fields["#_calls"] = 1
     if req.offer_amount is not None:
         fields["offer_amount"] = req.offer_amount
     if req.arv is not None:
@@ -243,7 +252,8 @@ def log_call_outcome(req: LogCallRequest, background_tasks: BackgroundTasks):
         lead_fields_for_notify = {**(existing_record["fields"] if existing_record else {}), **fields, "address": req.address}
         background_tasks.add_task(_safe_notify_attention_needed, req.address, lead_fields_for_notify, req.status)
 
-    return {"success": True, "airtable_record": result.get("id"), "call_count": current_call_count + 1}
+    true_call_count = current_call_count if existing_record else 1
+    return {"success": True, "airtable_record": result.get("id"), "call_count": true_call_count}
 
 
 def _safe_notify_attention_needed(address: str, lead_fields: dict, status: str):

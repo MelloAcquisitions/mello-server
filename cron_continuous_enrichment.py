@@ -1,4 +1,4 @@
-"""Render Cron Job: runs every 30 min, 8am-9pm. Schedule in Render: */30 8-20 * * *"""
+"""Render Cron Job: every 30 min, 8am-9pm Monterrey time. Schedule in Render (UTC): */30 14-23,0-2 * * *"""
 
 from airtable_helpers import query_leads, upsert_lead
 from orchestrator_lib import enrich_lead_with_valuation

@@ -34,6 +34,19 @@ TARGET_CONCURRENT_CALLS = 3  # start conservative for real-world testing; raise
 CALL_SCHEDULE_DAYS = [0, 0, 2, 9, 16, 23, 30]
 MAX_ATTEMPTS = len(CALL_SCHEDULE_DAYS)
 
+# Separate, more generous ceiling for leads with a real scheduled callback
+# date. These are deliberately long-lived (a seller saying "check back in 6
+# months" shouldn't be dropped at 30 days), but they still need a hard stop
+# so an unreachable one doesn't get redialed indefinitely.
+MAX_SCHEDULED_ATTEMPTS = 15
+
+# "Offer Made" is the warmest bucket in the system — a real number is on the
+# table and the seller hasn't rejected it. Letting those sit on the standard
+# 9/16/23-day spacing wastes the momentum that makes them valuable, so they
+# get their own tight cadence measured from the LAST call rather than from
+# lead creation.
+OFFER_MADE_RETRY_DAYS = 2
+
 
 def _parse_date_safely(date_string: str) -> date:
     """
@@ -58,8 +71,13 @@ def is_lead_exhausted(date_created: str, call_count: int, next_contact_date: str
     """
     if next_contact_date:
         # A real scheduled date means this lead is deliberately being held,
-        # not abandoned — never exhaust it while a future date is pending.
-        return False
+        # not abandoned — the normal 30-day cutoff shouldn't kill it.
+        # BUT it still needs SOME ceiling: without this, a scheduled lead
+        # that never answers would be redialed every few days forever
+        # (the dispatch safety-net keeps pushing the date forward), with no
+        # condition that ever ends it. Allow generous extra attempts for a
+        # genuinely scheduled lead, then stop.
+        return call_count >= MAX_SCHEDULED_ATTEMPTS
     if call_count >= MAX_ATTEMPTS:
         return True
     created = _parse_date_safely(date_created)
@@ -67,22 +85,30 @@ def is_lead_exhausted(date_created: str, call_count: int, next_contact_date: str
     return days_elapsed > CALL_SCHEDULE_DAYS[-1]
 
 
-def is_retry_due(date_created: str, call_count: int, next_contact_date: str = None) -> bool:
+def is_retry_due(date_created: str, call_count: int, next_contact_date: str = None,
+                 status: str = None, last_call_date: str = None) -> bool:
     """
-    True if enough time has passed since lead creation to allow the NEXT
-    attempt (call_count is how many attempts have happened so far).
+    True if enough time has passed to allow the NEXT attempt.
 
-    next_contact_date: if set, this REPLACES the normal decaying schedule —
-    the lead is due exactly on that date, not before, regardless of
-    call_count or the default cadence. This is what makes "check back in 6
-    months" actually mean something instead of either being retried every
-    few days by the normal schedule or dropped as Exhausted.
+    Priority order:
+      1. next_contact_date — an explicit scheduled callback REPLACES the
+         normal schedule entirely (this is what makes "check back in 6
+         months" mean something instead of being retried every few days).
+      2. status == "Offer Made" — the warmest bucket, uses OFFER_MADE_RETRY_DAYS
+         measured from the last call, not the standard decaying schedule.
+      3. Everything else — the default decaying schedule from lead creation.
     """
     if next_contact_date:
         scheduled = _parse_date_safely(next_contact_date)
         return date.today() >= scheduled
+
     if is_lead_exhausted(date_created, call_count):
         return False  # never due if already exhausted, regardless of schedule index
+
+    if status == "Offer Made" and last_call_date:
+        days_since_last = (date.today() - _parse_date_safely(last_call_date)).days
+        return days_since_last >= OFFER_MADE_RETRY_DAYS
+
     created = _parse_date_safely(date_created)
     days_elapsed = (date.today() - created).days
     earliest_allowed = CALL_SCHEDULE_DAYS[call_count]

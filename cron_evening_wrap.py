@@ -1,4 +1,4 @@
-"""Render Cron Job: runs once at 9:00 PM. Schedule in Render: 0 21 * * *"""
+"""Render Cron Job: 9:00 PM Monterrey time. Schedule in Render (UTC): 0 3 * * *"""
 
 from airtable_helpers import query_leads
 

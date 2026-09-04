@@ -72,17 +72,44 @@ def upsert_lead(address: str, fields: dict) -> dict:
     return response.json()
 
 
-def query_leads(filter_formula: str, max_records: int = 50) -> list:
+def query_leads(filter_formula: str, max_records: int = None) -> list:
     """
-    Returns a list of full records matching an Airtable filter formula.
-    Example: query_leads("AND({status}='New', {arv}='')") finds new leads
-    that haven't been enriched with valuation data yet.
+    Returns ALL full records matching an Airtable filter formula, following
+    Airtable's pagination automatically.
+
+    max_records: optional hard cap. Leave as None (the default) to get every
+    matching record — this matters a lot for correctness. Airtable returns
+    at most 100 records per page, and this previously defaulted to a silent
+    50-record cap, which meant:
+      - the opt-out suppression list in cron_dispatch_calls.py would stop
+        including people past the 50th opt-out, so someone who explicitly
+        asked not to be called could be called again. That's a real
+        compliance problem, not just a stats one.
+      - all-lead counts (evening wrap, dashboard stats) would silently
+        under-report once the table grew past 50 rows.
+    Only pass max_records when you genuinely want a small sample (e.g. a
+    single lookup by phone).
     """
-    params = {"filterByFormula": filter_formula, "maxRecords": max_records}
-    response = requests.get(AIRTABLE_URL, headers=_airtable_headers(), params=params, timeout=15)
-    if not response.ok:
-        raise AirtableError(response.status_code, f"query failed: {response.text}")
-    return response.json().get("records", [])
+    records = []
+    params = {"filterByFormula": filter_formula, "pageSize": 100}
+    if max_records is not None:
+        params["maxRecords"] = max_records
+
+    while True:
+        response = requests.get(AIRTABLE_URL, headers=_airtable_headers(), params=params, timeout=15)
+        if not response.ok:
+            raise AirtableError(response.status_code, f"query failed: {response.text}")
+        payload = response.json()
+        records.extend(payload.get("records", []))
+
+        offset = payload.get("offset")
+        if not offset:
+            break
+        if max_records is not None and len(records) >= max_records:
+            break
+        params["offset"] = offset
+
+    return records[:max_records] if max_records is not None else records
 
 
 # ---------------------------------------------------------------------------
