@@ -4,3 +4,4 @@ requests
 pydantic
 anthropic
 docxtpl
+python-multipart

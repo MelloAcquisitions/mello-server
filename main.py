@@ -36,7 +36,10 @@ from rentcast_lookup import (
 )
 from zillapi_lookup import get_zillow_valuation, extract_zestimate
 from dashboard import router as dashboard_router
-from airtable_helpers import find_lead_record, upsert_lead, query_leads, AirtableError, increment_daily_log_field
+from airtable_helpers import (
+    find_lead_record, find_lead_flexible, resolve_address_for_write,
+    upsert_lead, query_leads, AirtableError, increment_daily_log_field,
+)
 from deal_dispatch import dispatch_agreed_deal, notify_attention_needed
 
 app = FastAPI(title="Mello Acquisitions Agent Tools")
@@ -214,7 +217,12 @@ def log_call_outcome(req: LogCallRequest, background_tasks: BackgroundTasks):
     your Airtable table (currency type) or this will fail. If you haven't
     added it yet, add it before testing this endpoint.
     """
-    existing_record = find_lead_record(req.address)
+    # find_lead_flexible (not find_lead_record) because the live agent sends
+    # the FULL address ("123 Main St, Austin, TX 78745") while Airtable's
+    # address column only stores the street portion. An exact match alone
+    # would miss on every real call and create a duplicate orphan record.
+    existing_record = find_lead_flexible(req.address)
+    write_address = existing_record["fields"]["address"] if existing_record else req.address.split(",")[0].strip()
     current_call_count = existing_record["fields"].get("#_calls", 0) if existing_record else 0
 
     # DO NOT increment #_calls here when the record already exists.
@@ -227,9 +235,14 @@ def log_call_outcome(req: LogCallRequest, background_tasks: BackgroundTasks):
     # incremented it beforehand.
     fields = {
         "status": req.status,
-        "call_transcript_summary": req.notes,
         "last_call_date": __import__("datetime").date.today().isoformat(),
     }
+    # Only overwrite the summary if the agent actually sent one — req.notes
+    # defaults to "", and an unconditional assignment here would silently
+    # WIPE a previous call's notes on any call where the agent skipped this
+    # optional field.
+    if req.notes:
+        fields["call_transcript_summary"] = req.notes
     if not existing_record:
         fields["#_calls"] = 1
     if req.offer_amount is not None:
@@ -245,12 +258,12 @@ def log_call_outcome(req: LogCallRequest, background_tasks: BackgroundTasks):
     if req.next_contact_date is not None:
         fields["next_contact_date"] = req.next_contact_date
 
-    result = upsert_lead(req.address, fields)
+    result = upsert_lead(write_address, fields)
 
     NOTIFY_STATUSES = {"Human Call", "Offer Made", "Priority Follow-up"}
     if req.status in NOTIFY_STATUSES:
-        lead_fields_for_notify = {**(existing_record["fields"] if existing_record else {}), **fields, "address": req.address}
-        background_tasks.add_task(_safe_notify_attention_needed, req.address, lead_fields_for_notify, req.status)
+        lead_fields_for_notify = {**(existing_record["fields"] if existing_record else {}), **fields, "address": write_address}
+        background_tasks.add_task(_safe_notify_attention_needed, write_address, lead_fields_for_notify, req.status)
 
     true_call_count = current_call_count if existing_record else 1
     return {"success": True, "airtable_record": result.get("id"), "call_count": true_call_count}
@@ -435,11 +448,15 @@ def flag_for_human_review(req: FlagReviewRequest, background_tasks: BackgroundTa
     if req.mao_floor is not None:
         fields["mao_floor"] = req.mao_floor
 
-    result = upsert_lead(req.address, fields)
+    # Same full-address-vs-street-only mismatch as log_call_outcome — resolve
+    # to the existing record's real stored address before writing, so this
+    # updates the real lead instead of creating a duplicate.
+    write_address = resolve_address_for_write(req.address)
+    result = upsert_lead(write_address, fields)
 
-    full_record = find_lead_record(req.address)
-    lead_fields = full_record["fields"] if full_record else {**fields, "address": req.address}
-    background_tasks.add_task(_dispatch_and_record, req.address, lead_fields, req.agreed_price)
+    full_record = find_lead_record(write_address)
+    lead_fields = full_record["fields"] if full_record else {**fields, "address": write_address}
+    background_tasks.add_task(_dispatch_and_record, write_address, lead_fields, req.agreed_price)
 
     return {
         "success": True,

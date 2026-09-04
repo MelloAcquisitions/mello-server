@@ -54,6 +54,51 @@ def find_lead_record(address: str) -> Optional[dict]:
     return records[0] if records else None
 
 
+def find_lead_flexible(address: str) -> Optional[dict]:
+    """
+    Same as find_lead_record(), but also tries the street-only portion of
+    the address before giving up.
+
+    Why this exists: the live agent is given {{property_address}}, which is
+    the FULL address ("6506 Clubway Ln, Austin, TX 78745"). But the address
+    column in Airtable only ever holds the street portion ("6506 Clubway
+    Ln"), because that's what lead_sourcing.py wrote at intake time. An
+    exact match on the full string therefore always misses for a real call,
+    and upsert_lead() would silently CREATE A DUPLICATE record instead of
+    updating the real lead — splitting status/ARV/call-count history across
+    two rows for the same property. Use this (not find_lead_record) anywhere
+    a lookup might be seeded from the agent's own address variable.
+    """
+    record = find_lead_record(address)
+    if record:
+        return record
+
+    street = address.split(",")[0].strip()
+    if street and street != address:
+        return find_lead_record(street)
+
+    return None
+
+
+def resolve_address_for_write(address: str) -> str:
+    """
+    Returns the address string an upsert_lead() call should actually use, so
+    it lands on an existing record instead of creating a duplicate.
+
+    If a matching lead is found (by find_lead_flexible), returns THAT
+    record's own stored address value — guaranteeing upsert_lead()'s own
+    internal find_lead_record() call matches it exactly. If no match is
+    found (a genuinely new lead), falls back to the street-only portion of
+    whatever was passed in, since that's the format every other lead in the
+    table is stored in.
+    """
+    record = find_lead_flexible(address)
+    if record:
+        return record["fields"].get("address", address)
+    street = address.split(",")[0].strip()
+    return street or address
+
+
 def upsert_lead(address: str, fields: dict) -> dict:
     """Creates a new lead record, or updates the existing one for this address."""
     existing_record = find_lead_record(address)
