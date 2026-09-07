@@ -103,13 +103,29 @@ def call_duration(call: dict):
 
 def reconcile(call: dict) -> str:
     """
-    Returns one of: 'no_phone', 'no_lead', 'already_logged', 'backfilled',
-    'error' — so the summary at the end is honest about what actually
-    happened rather than just claiming success.
+    Returns one of: 'no_phone', 'no_lead', 'not_connected', 'already_logged',
+    'backfilled', 'error' — so the summary at the end is honest about what
+    actually happened rather than just claiming success.
     """
+    call_id = call.get("id")
     phone = (call.get("customer") or {}).get("number")
     if not phone:
         return "no_phone"
+
+    # Calls that never reached a human aren't outcomes worth recording.
+    # cron_dispatch_calls.py already incremented #_calls when it dialed, so
+    # the retry cadence is correct without this — writing a "call happened"
+    # note for a voicemail or a no-answer just adds noise to the record and
+    # can make a lead look contacted when nobody ever picked up.
+    ended_reason = call.get("endedReason", "unknown")
+    duration = call_duration(call)
+    NOT_CONNECTED = {
+        "customer-did-not-answer", "customer-busy", "no-answer", "voicemail",
+        "twilio-failed-to-connect", "customer-did-not-give-microphone-permission",
+        "assistant-did-not-receive-customer-audio",
+    }
+    if ended_reason in NOT_CONNECTED or (duration is not None and duration < 10):
+        return "not_connected"
 
     record = find_lead_by_phone(phone)
     if not record:
@@ -118,28 +134,56 @@ def reconcile(call: dict) -> str:
     fields = record["fields"]
     address = fields.get("address")
     when = call_date(call)
+    existing_notes = fields.get("call_transcript_summary") or ""
 
-    # Same detection rule the webhook uses: log_call_outcome always stamps
-    # last_call_date. Present and matching this call's date means one of the
-    # earlier layers already handled it — leave the richer data alone.
-    if fields.get("last_call_date") == when:
+    # Dedupe on the VAPI CALL ID, not on the date.
+    #
+    # An earlier version checked "is last_call_date == today", which breaks
+    # the moment a lead is dialed twice in one day: the first call gets
+    # backfilled, stamps today's date, and the second call then looks
+    # already-handled and is silently dropped. Recording the call id in the
+    # note text makes each call individually identifiable, needs no new
+    # Airtable column, and survives reruns of this cron.
+    if call_id and call_id in existing_notes:
         return "already_logged"
 
-    duration = call_duration(call)
-    ended_reason = call.get("endedReason", "unknown")
+    # If the in-call tool logged this same call today, its note is richer
+    # than anything reconstructable here — leave it alone. This is a weaker
+    # check than the call-id one above (it can't tell two same-day calls
+    # apart) so it runs second, only as a fallback for calls logged before
+    # call ids were being recorded.
+    if fields.get("last_call_date") == when and "[RECONCILED" not in existing_notes \
+            and "[AUTO-LOGGED" not in existing_notes:
+        return "already_logged"
+
     summary = (call.get("analysis") or {}).get("summary") or ""
     transcript = call.get("transcript") or ""
 
     note = (
-        f"[RECONCILED by cron — neither the in-call tool nor the end-of-call "
-        f"webhook recorded this call.] Date: {when}. Duration: "
-        f"{duration if duration is not None else 'unknown'}s. Ended: {ended_reason}. "
-        f"Summary: {summary or 'none'}"
+        f"\n\n[RECONCILED by cron — neither the in-call tool nor the end-of-call "
+        f"webhook recorded this call. vapi_call_id: {call_id}] Date: {when}. "
+        f"Duration: {duration if duration is not None else 'unknown'}s. "
+        f"Ended: {ended_reason}. "
     )
-    if transcript and not summary:
-        note += f" Transcript excerpt: {transcript[:600]}"
+    if summary:
+        note += f"Summary: {summary}"
+    elif transcript:
+        # No analysis.summary means no analysis plan is configured on the
+        # assistant in Vapi. Say so explicitly rather than silently passing
+        # off a raw transcript excerpt as though it were a summary.
+        note += (f"(No Vapi analysis summary available — enable an analysis plan "
+                 f"on the assistant to get real summaries.) Transcript excerpt: "
+                 f"{transcript[:800]}")
+    else:
+        note += "No summary or transcript available."
 
-    update = {"last_call_date": when, "call_transcript_summary": note[:99000]}
+    # APPEND, never overwrite. The record has one notes field and a lead can
+    # be called many times; overwriting destroys the history of every prior
+    # call, including any opt-out language a human would need to see.
+    update = {
+        "last_call_date": when,
+        "call_transcript_summary": (existing_notes + note).strip()[:99000],
+    }
 
     # Same conservative status rule as the webhook: only nudge "New" to
     # "Contacted". Never infer Rejected or Opt Out from a transcript here —
@@ -171,6 +215,7 @@ if __name__ == "__main__":
     print("\nSummary:")
     print(f"  already logged correctly : {tally.get('already_logged', 0)}")
     print(f"  backfilled by this cron  : {tally.get('backfilled', 0)}")
+    print(f"  never connected (skipped): {tally.get('not_connected', 0)}")
     print(f"  no matching lead         : {tally.get('no_lead', 0)}")
     print(f"  no phone on call record  : {tally.get('no_phone', 0)}")
     print(f"  errors                   : {tally.get('error', 0)}")

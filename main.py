@@ -413,13 +413,18 @@ async def vapi_call_ended(request: Request):
         return {"received": True, "logged_by_agent": True}
 
     # The agent did NOT log this call. Record it ourselves.
+    # APPEND to any existing notes rather than replacing them — a lead can be
+    # called many times, and overwriting would destroy the history of every
+    # prior call, including opt-out language a human would need to see.
+    existing_notes = fields.get("call_transcript_summary") or ""
+    auto_note = (
+        f"\n\n[AUTO-LOGGED by end-of-call webhook — the agent did not call "
+        f"log_call_outcome for this call.] Date: {today}. Duration: {duration}s. "
+        f"Ended: {ended_reason}. Vapi summary: {ai_summary or 'none available'}"
+    )
     fallback = {
         "last_call_date": today,
-        "call_transcript_summary": (
-            f"[AUTO-LOGGED by end-of-call webhook — the agent did not call "
-            f"log_call_outcome for this call.] Duration: {duration}s. "
-            f"Ended: {ended_reason}. Vapi summary: {ai_summary or 'none available'}"
-        ),
+        "call_transcript_summary": (existing_notes + auto_note).strip()[:99000],
     }
 
     # Status is deliberately conservative. We only move a lead off "New",
