@@ -1,47 +1,57 @@
 """
 Mello Acquisitions — Agent Tool Server
 
-This is the "toolbox" Vapi calls into during a live call. Claude decides
-WHEN to call these; this server does the actual work (property lookups,
-math, writing to Airtable) and hands the result back.
+The "toolbox" Vapi calls into during a live call. The voice model decides
+WHEN to call these; this server does the work (math, writing to Airtable)
+and hands the result back.
 
-SETUP:
-1. pip install -r requirements.txt
-2. Set these environment variables (locally for testing, and on your hosting
-   platform once deployed):
-     RENTCAST_API_KEY
-     AIRTABLE_API_KEY
-     AIRTABLE_BASE_ID       (from your Airtable base's URL or API docs page)
-     AIRTABLE_TABLE_NAME    (e.g. "Leads")
-3. Run locally to test: uvicorn main:app --reload
-   Then visit http://127.0.0.1:8000/docs for an interactive test page —
-   FastAPI builds this automatically, no extra work needed.
-4. Deploy (see deployment steps provided separately) to get a public URL.
+The three custom Vapi tools are type `apiRequest`, which sends a FLAT JSON
+body and accepts any 2xx JSON response. The endpoints below are therefore
+the correct shape — no toolCallList envelope parsing is needed. (A
+`vapi_tools_router.py` written before the tool type was known spoke the
+`function`-tool protocol instead; it has been deleted.)
+
+RUN LOCALLY:  uvicorn main:app --reload   ->  http://127.0.0.1:8000/docs
+
+REQUIRED ENV (web service):
+  AIRTABLE_API_KEY, AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME,
+  RESEND_API_KEY, OWNER_EMAIL, BUYER_NAME, BUYER_PHONE,
+  DEFAULT_TITLE_COMPANY, DASHBOARD_PASSWORD
+STRONGLY RECOMMENDED:
+  MELLO_TOOL_SECRET  — see require_tool_auth() below.
+
+CHANGES IN THIS CLEANUP
+-----------------------
+- Tool endpoints are no longer unauthenticated (see require_tool_auth).
+- Empty-string numerics from Vapi are coerced instead of 422-ing the call.
+- Status values are validated against the Airtable single-select options,
+  so one bad status string can't lose the whole call outcome.
+- Notes are APPENDED, matching the two fallback layers, instead of
+  overwriting the lead's entire call history.
+- The end-of-call webhook dedupes on the Vapi CALL ID, not on today's date.
+- REMOVED: /get_property_analysis and /calculate_final_fee (no Vapi tool
+  called either; valuation now happens in the enrichment crons before the
+  call, per system prompt v13 "do not fetch mid-call"), and /inbound_email
+  and /inbound_sms (both were TODO stubs that parsed a payload, printed a
+  line and threw it away — they looked like working integrations and were
+  not).
 """
 
 import os
-from typing import Optional
+from typing import Any, Optional, Union
 
-import requests
-from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from calculator import flip_mao, calculate_final_fee
-from rentcast_lookup import (
-    get_sold_comps,
-    get_property_valuation,
-    analyze_sold_comps,
-    get_recommended_arv,
-)
-from zillapi_lookup import get_zillow_valuation, extract_zestimate
-from dashboard import router as dashboard_router
 from airtable_helpers import (
-    find_lead_record, find_lead_flexible, find_lead_by_phone,
-    resolve_address_for_write, upsert_lead, query_leads, AirtableError,
-    increment_daily_log_field,
+    AirtableError, append_notes, find_lead_by_phone, find_lead_flexible,
+    increment_daily_log_field, resolve_address_for_write, upsert_lead,
 )
+from calculator import flip_mao
+from dashboard import router as dashboard_router
 from deal_dispatch import dispatch_agreed_deal, notify_attention_needed
+from mello_time import today_iso
 
 app = FastAPI(title="Mello Acquisitions Agent Tools")
 app.include_router(dashboard_router)
@@ -51,223 +61,264 @@ app.include_router(dashboard_router)
 async def airtable_error_handler(request: Request, exc: AirtableError):
     return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
-AIRTABLE_API_KEY = os.environ.get("AIRTABLE_API_KEY")
-AIRTABLE_BASE_ID = os.environ.get("AIRTABLE_BASE_ID")
-AIRTABLE_TABLE_NAME = os.environ.get("AIRTABLE_TABLE_NAME", "Leads")
-AIRTABLE_URL = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE_NAME}"
+
+# ---------------------------------------------------------------------------
+# Authentication
+#
+# These endpoints previously had NONE. Anyone who found the Render URL could
+# write to the Leads table, mark a lead Agreed, and trigger a contract
+# generation + email — no key, no signature, no rate limit. The URL is not
+# secret: it is pasted into Vapi's dashboard, it appears in call logs, and
+# it was published in this project's own handoff docs.
+#
+# Vapi apiRequest tools support custom headers. Set MELLO_TOOL_SECRET here
+# and add the matching `X-Mello-Token` header to each of the three tools in
+# Vapi. Until it is set, requests are allowed and a warning is logged — so
+# deploying this file cannot take the live call path down. Set it, add the
+# headers, then confirm the warning stops appearing.
+# ---------------------------------------------------------------------------
+
+MELLO_TOOL_SECRET = os.environ.get("MELLO_TOOL_SECRET")
+
+
+def require_tool_auth(x_mello_token: Optional[str]) -> None:
+    if not MELLO_TOOL_SECRET:
+        print("WARNING: MELLO_TOOL_SECRET is not set — tool endpoints are OPEN to "
+              "anyone with the URL. Set it and add an X-Mello-Token header to each "
+              "Vapi tool.")
+        return
+    import secrets as _secrets
+    if not x_mello_token or not _secrets.compare_digest(x_mello_token, MELLO_TOOL_SECRET):
+        raise HTTPException(status_code=401, detail="Invalid or missing X-Mello-Token")
 
 
 # ---------------------------------------------------------------------------
-# Request/response schemas — FastAPI uses these to validate incoming calls
-# and auto-generate the /docs test page.
+# Airtable single-select options for `status`.
+#
+# Writing a value Airtable does not recognise returns 422 and the ENTIRE
+# write fails — meaning a call outcome is lost because the model produced
+# "Follow Up" instead of "Priority Follow-up". Validating here converts a
+# total loss into a slightly-less-precise save.
+#
+# "Closed" is set manually by the owner once a deal funds. "New" and
+# "Exhausted" are set by the system. The agent should never send any of
+# those three, but they are listed so a stray one is not rejected outright.
 # ---------------------------------------------------------------------------
 
-class PropertyAnalysisRequest(BaseModel):
-    address: str
-    city: str
-    state: str
-    zip_code: str
+VALID_STATUSES = {
+    "New", "Contacted", "Qualified", "Offer Made", "Agreed", "Rejected",
+    "Opt Out", "Human Call", "Priority Follow-up", "Exhausted", "Closed",
+}
+
+# Common near-misses a voice model produces, mapped to the real option.
+STATUS_ALIASES = {
+    "optout": "Opt Out", "opt-out": "Opt Out", "do not call": "Opt Out",
+    "priority followup": "Priority Follow-up", "priority follow up": "Priority Follow-up",
+    "follow up": "Priority Follow-up", "followup": "Priority Follow-up",
+    "human": "Human Call", "human callback": "Human Call", "callback": "Human Call",
+    "offer": "Offer Made", "offermade": "Offer Made",
+    "not interested": "Rejected", "declined": "Rejected",
+}
+
+
+def normalize_status(raw: str) -> str:
+    """Maps whatever the model sent onto a real Airtable option. Falls back
+    to 'Contacted' — the honest, conservative meaning of "a human was
+    reached, outcome unclear" — rather than failing the write."""
+    if not raw:
+        return "Contacted"
+    candidate = str(raw).strip()
+    if candidate in VALID_STATUSES:
+        return candidate
+    lowered = candidate.lower()
+    for option in VALID_STATUSES:
+        if option.lower() == lowered:
+            return option
+    if lowered in STATUS_ALIASES:
+        return STATUS_ALIASES[lowered]
+    print(f"  Unrecognised status {raw!r} from the agent — saving as 'Contacted' "
+          f"so the outcome is not lost. Check the tool's status description in Vapi.")
+    return "Contacted"
+
+
+def _num(value: Any) -> Optional[float]:
+    """
+    Coerces a Vapi-supplied numeric argument, tolerating an empty string.
+
+    The Vapi tool schemas define numeric parameters with `"default": ""` —
+    an empty string default on a `number` type. If Vapi injects defaults for
+    omitted optional fields, the body arrives as {"arv": ""}, which a strict
+    Optional[float] rejects with a 422. The model then sees the tool fail
+    mid-call and the outcome is never written.
+
+    Rather than depending on whether Vapi does that, accept both and coerce.
+    """
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _text(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    value = str(value).strip()
+    return value or None
+
+
+Number = Optional[Union[float, str]]
 
 
 class MaoRequest(BaseModel):
-    arv: float
-    repair_cost: float
-    wholesale_fee_min: float = 10000
-    buyer_profit_pct: float = 0.10
-
-
-class FinalFeeRequest(BaseModel):
-    arv: float
-    repair_cost: float
-    agreed_price: float
-    buyer_profit_pct: float = 0.10
+    arv: Union[float, str]
+    repair_cost: Union[float, str]
+    wholesale_fee_min: Number = 10000
+    buyer_profit_pct: Number = 0.10
 
 
 class LogCallRequest(BaseModel):
     address: str
-    status: str  # Must exactly match your Airtable single-select options (case-sensitive):
-                 # New | Contacted | Qualified | Offer Made | Agreed | Rejected | Opt Out | Human Call | Priority Follow-up | Exhausted | Closed
-                 # NOTE: "Closed" is never set by the AI or this API — it's set manually
-                 # by you once a deal actually funds. Listed here only for completeness.
+    status: str
     notes: Optional[str] = ""
-    offer_amount: Optional[float] = None
-    arv: Optional[float] = None
-    repair_estimate: Optional[float] = None
-    mao_floor: Optional[float] = None
+    offer_amount: Number = None
+    arv: Number = None
+    repair_estimate: Number = None
+    mao_floor: Number = None
     email: Optional[str] = None
-    next_contact_date: Optional[str] = None  # ISO date "2027-02-15" — set when the seller gave a real future timeframe ("check back in 6 months")
+    # ISO date "2027-02-15" — set when the seller gave a real future timeframe.
+    next_contact_date: Optional[str] = None
 
 
 class FlagReviewRequest(BaseModel):
     address: str
-    agreed_price: float
+    agreed_price: Union[float, str]
     call_transcript_summary: str
     email: Optional[str] = None
-    repair_estimate: Optional[float] = None
-    mao_floor: Optional[float] = None
+    repair_estimate: Number = None
+    mao_floor: Number = None
 
 
 # ---------------------------------------------------------------------------
-# Airtable helpers — imported at the top of the file
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Endpoints — these URLs are what you paste into Vapi's tool configuration
+# Endpoints — these URLs go into Vapi's tool configuration.
+#
+# The hostname in Vapi must be the one from Render's dashboard, suffix and
+# all (https://mello-server-hqfi.onrender.com), not the service name. The
+# old suffix-less hostname still resolves but has nothing behind it, so
+# requests hang forever instead of failing — that cost this project weeks.
 # ---------------------------------------------------------------------------
 
 @app.get("/")
 def health_check():
-    """Quick check that the server is alive — visit this URL in a browser after deploying."""
-    return {"status": "Mello agent server is running"}
-
-
-@app.post("/get_property_analysis")
-def get_property_analysis(req: PropertyAnalysisRequest):
-    """
-    The main research call. Pulls sold comps + RentCast AVM + Zillow Zestimate,
-    reconciles all available sources, and returns a conservative recommended
-    ARV plus supporting data (investor buyer activity, comp count, etc.).
-    """
-    full_address = f"{req.address}, {req.city}, {req.state} {req.zip_code}"
-
-    avm_result = get_property_valuation(full_address)
-    subject = avm_result.get("subjectProperty", {})
-
-    sold_result = get_sold_comps(full_address, subject_property=subject)
-    sold_properties = sold_result if isinstance(sold_result, list) else sold_result.get("properties", [])
-
-    analysis = analyze_sold_comps(sold_properties, subject_property=subject)
-
-    # Zillow is a genuinely independent third source — but it's a separate
-    # vendor with its own possible outages, so it must never take down the
-    # whole endpoint. If it fails, we just proceed with the two RentCast
-    # candidates, same as before Zillow existed.
-    zillow_estimate = None
-    try:
-        zillow_result = get_zillow_valuation(full_address)
-        zillow_estimate = extract_zestimate(zillow_result)
-    except Exception as e:
-        print(f"Zillow lookup failed, proceeding without it: {e}")
-
-    recommendation = get_recommended_arv(analysis, avm_result, zillow_estimate=zillow_estimate)
-
+    """Quick liveness check. Also reports whether tool auth is configured,
+    so you can confirm the secret took effect without reading logs."""
     return {
-        "recommended_arv": recommendation["recommended_arv"],
-        "source": recommendation["source"],
-        "spread_pct": recommendation["spread_pct"],
-        "all_candidates": recommendation["all_candidates"],
-        "comp_count": analysis["comp_count"],
-        "investor_buyer_pct": analysis["investor_buyer_pct"],
-        "subject_property": {
-            "squareFootage": subject.get("squareFootage"),
-            "yearBuilt": subject.get("yearBuilt"),
-            "bedrooms": subject.get("bedrooms"),
-            "bathrooms": subject.get("bathrooms"),
-        },
+        "status": "Mello agent server is running",
+        "tool_auth": "enabled" if MELLO_TOOL_SECRET else "OPEN — set MELLO_TOOL_SECRET",
     }
 
 
 @app.post("/calculate_mao")
-def calculate_mao_endpoint(req: MaoRequest):
-    """Standard flip-deal MAO calculation — returns ceiling, opening offer,
-    and the scaled wholesale fee. Can return no_deal=True if the numbers
-    can't support the $10K minimum fee while protecting buyer margin."""
+def calculate_mao_endpoint(req: MaoRequest, x_mello_token: Optional[str] = Header(default=None)):
+    """
+    Standard flip-deal MAO calculation. Returns the ceiling (mao_floor), an
+    opening offer, and the scaled wholesale fee — or no_deal=True with a
+    plain-language reason when the numbers cannot support a real offer to
+    the seller while protecting the end buyer's margin.
+    """
+    require_tool_auth(x_mello_token)
     return flip_mao(
-        arv=req.arv,
-        repair_cost=req.repair_cost,
-        wholesale_fee_min=req.wholesale_fee_min,
-        buyer_profit_pct=req.buyer_profit_pct,
-    )
-
-
-@app.post("/calculate_final_fee")
-def calculate_final_fee_endpoint(req: FinalFeeRequest):
-    """
-    Call this ONCE a real price has been agreed with the seller — not
-    during the initial offer. Your actual fee can be higher than the
-    minimum used to set the ceiling if you negotiated a lower price than
-    the max — that's expected and good, not something to cap.
-    """
-    return calculate_final_fee(
-        arv=req.arv,
-        repair_cost=req.repair_cost,
-        agreed_price=req.agreed_price,
-        buyer_profit_pct=req.buyer_profit_pct,
+        arv=_num(req.arv) or 0,
+        repair_cost=_num(req.repair_cost) or 0,
+        wholesale_fee_min=_num(req.wholesale_fee_min) or 10000,
+        buyer_profit_pct=_num(req.buyer_profit_pct) or 0.10,
     )
 
 
 @app.post("/log_call_outcome")
-def log_call_outcome(req: LogCallRequest, background_tasks: BackgroundTasks):
+def log_call_outcome(req: LogCallRequest, background_tasks: BackgroundTasks,
+                     x_mello_token: Optional[str] = Header(default=None)):
     """
-    Writes (or updates) the lead's record in Airtable. Called at the end of
-    EVERY call, regardless of outcome — including opt-outs and rejections.
+    Writes (or updates) the lead's record. Called at the end of EVERY call,
+    regardless of outcome — including opt-outs and rejections.
 
-    Automatically increments the #_calls column by 1 each time this fires,
-    since one call outcome logged = one call made.
+    Email notification fires ONLY for the three statuses that genuinely need
+    a human: "Human Call", "Offer Made" and "Priority Follow-up". Everything
+    else is logged silently and deliberately, so the inbox only ever
+    contains leads that warrant real time.
 
-    Email notification fires ONLY for statuses that genuinely need your
-    attention — "Human Call" (seller asked for a person), "Offer Made" (a
-    real number is on the table, close to a deal), and "Priority Follow-up"
-    (weak number but strong, specific reason to sell — worth your personal
-    touch). Every other outcome (New, Contacted, Qualified, Rejected, Opt
-    Out, Exhausted) is logged silently — deliberately not emailed, so you
-    only ever see leads that actually warrant your time.
-
-    NOTE: writes to an "offer_amount" field — this column must exist in
-    your Airtable table (currency type) or this will fail. If you haven't
-    added it yet, add it before testing this endpoint.
+    NOTE: writes to an `offer_amount` field — that column must exist on the
+    Leads table (currency type) or this fails.
     """
-    # find_lead_flexible (not find_lead_record) because the live agent sends
-    # the FULL address ("123 Main St, Austin, TX 78745") while Airtable's
-    # address column only stores the street portion. An exact match alone
-    # would miss on every real call and create a duplicate orphan record.
+    require_tool_auth(x_mello_token)
+
+    # find_lead_flexible, not find_lead_record: the live agent sends the FULL
+    # address ("123 Main St, Austin, TX 78745") while Airtable's address
+    # column holds only the street portion. An exact match misses on every
+    # real call and upsert_lead would create a duplicate orphan record.
     existing_record = find_lead_flexible(req.address)
-    write_address = existing_record["fields"]["address"] if existing_record else req.address.split(",")[0].strip()
-    current_call_count = existing_record["fields"].get("#_calls", 0) if existing_record else 0
+    existing_fields = existing_record["fields"] if existing_record else {}
+    write_address = existing_fields.get("address") or req.address.split(",")[0].strip()
+    current_call_count = existing_fields.get("#_calls", 0) or 0
 
-    # DO NOT increment #_calls here when the record already exists.
-    # cron_dispatch_calls.py already incremented it at the moment the call
-    # was triggered. Incrementing again here would count every ANSWERED call
-    # as two attempts — burning through the retry schedule twice as fast as
-    # intended and inflating every call statistic on the dashboard.
-    # Only set it for a brand-new record (e.g. a manually-triggered test
-    # call for an address that isn't in the table yet), where nothing
-    # incremented it beforehand.
     fields = {
-        "status": req.status,
-        "last_call_date": __import__("datetime").date.today().isoformat(),
+        "status": normalize_status(req.status),
+        "last_call_date": today_iso(),
     }
-    # Only overwrite the summary if the agent actually sent one — req.notes
-    # defaults to "", and an unconditional assignment here would silently
-    # WIPE a previous call's notes on any call where the agent skipped this
-    # optional field.
-    if req.notes:
-        fields["call_transcript_summary"] = req.notes
+
+    # APPEND, never replace. A lead can be called many times and there is one
+    # notes field. The end-of-call webhook and the reconcile cron both append;
+    # this endpoint used to overwrite, so the richest and most common path was
+    # the one destroying prior call history — including opt-out language a
+    # human would need to see.
+    note = _text(req.notes)
+    if note:
+        fields["call_transcript_summary"] = append_notes(
+            existing_fields.get("call_transcript_summary"),
+            f"[{today_iso()}] {note}",
+        )
+
+    # DO NOT increment #_calls for an existing record. cron_dispatch_calls.py
+    # already incremented it when the call was triggered. Incrementing again
+    # would count every ANSWERED call as two attempts — burning the retry
+    # schedule twice as fast and inflating every dashboard statistic. Only
+    # set it for a brand-new record (e.g. a manual test call for an address
+    # not yet in the table), where nothing incremented it beforehand.
     if not existing_record:
         fields["#_calls"] = 1
-    if req.offer_amount is not None:
-        fields["offer_amount"] = req.offer_amount
-    if req.arv is not None:
-        fields["arv"] = req.arv
-    if req.repair_estimate is not None:
-        fields["repair_estimate"] = req.repair_estimate
-    if req.mao_floor is not None:
-        fields["mao_floor"] = req.mao_floor
-    if req.email is not None:
-        fields["email"] = req.email
-    if req.next_contact_date is not None:
-        fields["next_contact_date"] = req.next_contact_date
+
+    for key, value in (
+        ("offer_amount", _num(req.offer_amount)),
+        ("arv", _num(req.arv)),
+        ("repair_estimate", _num(req.repair_estimate)),
+        ("mao_floor", _num(req.mao_floor)),
+    ):
+        if value is not None:
+            fields[key] = value
+
+    for key, value in (
+        ("email", _text(req.email)),
+        ("next_contact_date", _text(req.next_contact_date)),
+    ):
+        if value is not None:
+            fields[key] = value
 
     result = upsert_lead(write_address, fields)
 
     NOTIFY_STATUSES = {"Human Call", "Offer Made", "Priority Follow-up"}
-    if req.status in NOTIFY_STATUSES:
-        lead_fields_for_notify = {**(existing_record["fields"] if existing_record else {}), **fields, "address": write_address}
-        background_tasks.add_task(_safe_notify_attention_needed, write_address, lead_fields_for_notify, req.status)
+    if fields["status"] in NOTIFY_STATUSES:
+        lead_fields_for_notify = {**existing_fields, **fields, "address": write_address}
+        background_tasks.add_task(
+            _safe_notify_attention_needed, write_address, lead_fields_for_notify, fields["status"]
+        )
 
-    true_call_count = current_call_count if existing_record else 1
-    return {"success": True, "airtable_record": result.get("id"), "call_count": true_call_count}
+    return {
+        "success": True,
+        "airtable_record": result.get("id"),
+        "call_count": current_call_count if existing_record else 1,
+        "status_saved": fields["status"],
+    }
 
 
 def _safe_notify_attention_needed(address: str, lead_fields: dict, status: str):
@@ -275,80 +326,110 @@ def _safe_notify_attention_needed(address: str, lead_fields: dict, status: str):
         notify_attention_needed(lead_fields, status)
         print(f"Attention-needed notification sent for {address} (status: {status})")
     except Exception as e:
-        print(f"Failed to send human-call notification for {address} (status still saved): {e}")
+        print(f"Failed to send notification for {address} (status still saved): {e}")
 
 
-
-@app.post("/inbound_email")
-async def inbound_email(request: Request):
+@app.post("/flag_for_human_review")
+def flag_for_human_review(req: FlagReviewRequest, background_tasks: BackgroundTasks,
+                          x_mello_token: Optional[str] = Header(default=None)):
     """
-    Mailgun calls this the moment a seller replies to an email, attachments
-    included. Extracts any image/video attachments and stores their URLs
-    directly on the matching lead's Airtable record.
+    Called ONLY when a seller verbally agrees to a price. Marks the lead
+    Agreed, then queues contract generation + email to YOU (not the seller)
+    as a BACKGROUND task, so this returns to Vapi immediately instead of
+    making the live call wait on a docx render and an API send.
+
+    Interim workflow while Box Sign is on hold: this sends nothing to the
+    seller. You review the attached contract, add a signature field, and
+    send it on yourself.
     """
-    form = await request.form()
-    sender_email = form.get("sender", "")
-    attachment_count = int(form.get("attachment-count", 0))
+    require_tool_auth(x_mello_token)
 
-    attachment_urls = []
-    for i in range(1, attachment_count + 1):
-        # Mailgun includes a direct URL for each attachment in the webhook payload
-        key = f"attachment-{i}"
-        if key in form:
-            file = form[key]
-            attachment_urls.append({"url": file.url if hasattr(file, "url") else str(file)})
+    # Same full-address-vs-street-only mismatch as log_call_outcome. Resolve
+    # once and reuse the record we already fetched, instead of the previous
+    # resolve -> upsert -> re-fetch sequence (up to five Airtable round trips
+    # on a live call, against a 5 req/sec per-base rate limit).
+    existing_record = find_lead_flexible(req.address)
+    existing_fields = existing_record["fields"] if existing_record else {}
+    write_address = existing_fields.get("address") or resolve_address_for_write(req.address)
 
-    # TODO: look up the lead by matching sender_email against an "email"
-    # field on the Leads table (needs adding — currently no email column),
-    # then append attachment_urls to an Airtable Attachment-type field.
-    print(f"Received {len(attachment_urls)} attachment(s) from {sender_email}")
+    agreed_price = _num(req.agreed_price)
+    if agreed_price is None:
+        raise HTTPException(status_code=400, detail="agreed_price is required and must be a number")
 
-    return {"received": True, "attachment_count": len(attachment_urls)}
+    fields = {
+        "status": "Agreed",
+        "offer_amount": agreed_price,
+        "last_call_date": today_iso(),
+        "call_transcript_summary": append_notes(
+            existing_fields.get("call_transcript_summary"),
+            f"[{today_iso()} AGREED at ${agreed_price:,.0f}] {req.call_transcript_summary}",
+        ),
+    }
+    if _text(req.email):
+        fields["email"] = _text(req.email)
+    for key, value in (("repair_estimate", _num(req.repair_estimate)),
+                       ("mao_floor", _num(req.mao_floor))):
+        if value is not None:
+            fields[key] = value
+
+    result = upsert_lead(write_address, fields)
+
+    lead_fields = {**existing_fields, **fields, "address": write_address}
+    background_tasks.add_task(_dispatch_and_record, write_address, lead_fields, agreed_price)
+
+    return {
+        "success": True,
+        "airtable_record": result.get("id"),
+        "needs_human_review": True,
+        "contract_dispatch": "queued",
+    }
 
 
-@app.post("/inbound_sms")
-async def inbound_sms(request: Request):
+def _dispatch_and_record(address: str, lead_fields: dict, agreed_price: float):
     """
-    Twilio calls this the moment a seller texts back, MMS photos included.
-    Extracts any media URLs and stores them directly on the matching lead's
-    Airtable record.
+    Runs after the HTTP response has gone back to Vapi, so the call keeps
+    moving instead of pausing for docx generation and an email send.
+    Exceptions here cannot be surfaced to the call, so they are logged
+    loudly AND written onto the record, where the dashboard will show them.
     """
-    form = await request.form()
-    from_number = form.get("From", "")
-    num_media = int(form.get("NumMedia", 0))
-
-    media_urls = []
-    for i in range(num_media):
-        media_url = form.get(f"MediaUrl{i}")
-        if media_url:
-            media_urls.append({"url": media_url})
-
-    # TODO: look up the lead by matching from_number against the "phone"
-    # field already on your Leads table, then append media_urls to an
-    # Airtable Attachment-type field (add one if it doesn't exist yet —
-    # Airtable's Attachment field type accepts external URLs directly and
-    # will fetch/store the file itself, no separate upload step needed).
-    print(f"Received {len(media_urls)} MMS attachment(s) from {from_number}")
-
-    return {"received": True, "media_count": len(media_urls)}
-
+    try:
+        dispatch_agreed_deal(lead_fields, agreed_price)
+        upsert_lead(address, {"#_emails": (lead_fields.get("#_emails", 0) or 0) + 1})
+        print(f"Contract emailed successfully for {address}")
+    except Exception as e:
+        print(f"Contract dispatch FAILED for {address} "
+              f"(Agreed status still saved — handle manually): {e}")
+        try:
+            upsert_lead(address, {
+                "call_transcript_summary": append_notes(
+                    lead_fields.get("call_transcript_summary"),
+                    f"[{today_iso()}] CONTRACT EMAIL FAILED — send it manually: {e}",
+                )
+            })
+        except Exception as inner_e:
+            print(f"Also failed to record the dispatch failure on the record: {inner_e}")
 
 
 @app.post("/vapi_call_ended")
 async def vapi_call_ended(request: Request):
     """
-    Vapi's end-of-call-report webhook — fires automatically when a call
-    that actually CONNECTED ends, independent of whether the live agent's
-    own log_call_outcome tool call succeeded. Best-effort enrichment, not
-    a guarantee:
-      - Vapi does NOT send this for unanswered calls (confirmed by their
-        own support) — fine, the retry cadence already handles no-answer
-        leads correctly without this.
-      - There's a known intermittent bug where this occasionally doesn't
-        fire even for connected calls.
+    Vapi's end-of-call-report webhook — LAYER 2 of the three-layer logging
+    architecture. Fires from Vapi's side when a connected call ends,
+    independent of whether the model called log_call_outcome.
 
-    Configure this as your assistant's Server URL in Vapi, with
-    "end-of-call-report" included in serverMessages.
+    Best-effort, not a guarantee:
+      - Vapi does not send this for unanswered calls (confirmed by their
+        support). Fine — the retry cadence handles no-answer leads already.
+      - There is a known intermittent bug where it does not fire even for
+        connected calls. That is why cron_reconcile_calls.py (layer 3, a
+        pull) exists.
+
+    Configure as the assistant's Server URL in Vapi, with
+    "end-of-call-report" in serverMessages. Note this endpoint is
+    deliberately NOT behind the tool secret: Vapi posts it from its own
+    infrastructure without the custom headers attached to the tools. It
+    writes nothing an attacker gains from and only ever moves New ->
+    Contacted, but if that changes, sign it instead.
     """
     body = await request.json()
     message = body.get("message", {})
@@ -356,16 +437,18 @@ async def vapi_call_ended(request: Request):
     if message.get("type") != "end-of-call-report":
         return {"received": True, "ignored": "not an end-of-call-report"}
 
+    call = message.get("call") or {}
+    call_id = call.get("id") or message.get("callId")
     duration = message.get("durationSeconds")
     ended_reason = message.get("endedReason")
-    phone = message.get("call", {}).get("customer", {}).get("number")
-    ai_summary = message.get("analysis", {}).get("summary", "")
+    phone = (call.get("customer") or {}).get("number")
+    ai_summary = (message.get("analysis") or {}).get("summary", "")
 
-    print(f"End-of-call report: phone={phone}, duration={duration}s, reason={ended_reason}")
+    print(f"End-of-call report: call={call_id} phone={phone} "
+          f"duration={duration}s reason={ended_reason}")
 
-    # This was previously only printed and then discarded — now it accumulates
-    # into today's Daily Log record so the dashboard can compute a REAL,
-    # duration-based Vapi cost estimate instead of a flat per-call guess.
+    # Accumulate into today's Daily Log so the dashboard can compute a real,
+    # duration-based Vapi cost instead of a flat per-call guess.
     if duration is not None:
         try:
             increment_daily_log_field("call_seconds_today", duration)
@@ -376,8 +459,7 @@ async def vapi_call_ended(request: Request):
         return {"received": True, "warning": "no phone number in payload"}
 
     # Phone formats never match exactly — Vapi sends E.164, Airtable stores
-    # whatever BatchData returned. find_lead_by_phone() tries the plausible
-    # written variants of the same number instead of one exact string.
+    # whatever BatchData returned.
     record = find_lead_by_phone(phone)
     if not record:
         print(f"  No Airtable lead matches {phone} — nothing to record against.")
@@ -385,132 +467,70 @@ async def vapi_call_ended(request: Request):
 
     fields = record["fields"]
     address = fields.get("address")
-    today = __import__("datetime").date.today().isoformat()
+    if not address:
+        print(f"  Lead {record.get('id')} has no address value — cannot write to it.")
+        return {"received": True, "warning": "matched lead has no address"}
 
-    # THE GUARANTEE: log_call_outcome is called BY THE MODEL, so it can
-    # silently never happen — the seller hangs up, the agent ends the call
-    # for abuse, the tool 422s, the model just forgets. This webhook fires
-    # from Vapi's side regardless, so it is the backstop that ensures no
-    # connected call ever goes unrecorded.
+    today = today_iso()
+    existing_notes = fields.get("call_transcript_summary") or ""
+
+    # DEDUPE ON THE VAPI CALL ID, not on today's date.
     #
-    # Detection: log_call_outcome always stamps last_call_date with today.
-    # If that stamp is missing, the model's own logging did not happen and
-    # we fill in what we can from Vapi's report.
-    already_logged = fields.get("last_call_date") == today
+    # The old check was `last_call_date == today`. That breaks the moment a
+    # lead is dialled twice in one day: the first call stamps today's date,
+    # and the second call then looks already-handled — so a second call the
+    # agent failed to log was silently dropped by the layer whose whole job
+    # is catching exactly that. cron_reconcile_calls.py already fixed this
+    # for layer 3; layer 2 still had the bug.
+    if call_id and call_id in existing_notes:
+        return {"received": True, "already_recorded": True}
 
-    if already_logged:
-        # The agent logged it properly. Don't overwrite its richer notes —
-        # just attach Vapi's summary and call metadata alongside them.
-        existing_notes = fields.get("call_transcript_summary") or ""
-        addition = f" [Call: {duration}s, ended: {ended_reason}]"
+    agent_logged_this_call = fields.get("last_call_date") == today
+
+    if agent_logged_this_call:
+        # The agent logged it. Don't touch its richer notes — attach Vapi's
+        # metadata alongside, tagged with the call id so a later run of this
+        # webhook (or the reconcile cron) recognises it.
+        addition = f"[Call {call_id}: {duration}s, ended: {ended_reason}]"
         if ai_summary and ai_summary not in existing_notes:
-            addition = f" [Call: {duration}s, ended: {ended_reason}. Vapi summary: {ai_summary}]"
+            addition = (f"[Call {call_id}: {duration}s, ended: {ended_reason}. "
+                        f"Vapi summary: {ai_summary}]")
         try:
-            upsert_lead(address, {"call_transcript_summary": (existing_notes + addition)[:99000]})
+            upsert_lead(address, {
+                "call_transcript_summary": append_notes(existing_notes, addition)
+            })
             print(f"  Appended call metadata to already-logged lead {address}")
         except Exception as e:
             print(f"  Could not append call metadata for {address}: {e}")
         return {"received": True, "logged_by_agent": True}
 
     # The agent did NOT log this call. Record it ourselves.
-    # APPEND to any existing notes rather than replacing them — a lead can be
-    # called many times, and overwriting would destroy the history of every
-    # prior call, including opt-out language a human would need to see.
-    existing_notes = fields.get("call_transcript_summary") or ""
     auto_note = (
-        f"\n\n[AUTO-LOGGED by end-of-call webhook — the agent did not call "
-        f"log_call_outcome for this call.] Date: {today}. Duration: {duration}s. "
-        f"Ended: {ended_reason}. Vapi summary: {ai_summary or 'none available'}"
+        f"[AUTO-LOGGED by end-of-call webhook — the agent did not call "
+        f"log_call_outcome. vapi_call_id: {call_id}] Date: {today}. "
+        f"Duration: {duration}s. Ended: {ended_reason}. "
+        f"Vapi summary: {ai_summary or 'none available'}"
     )
     fallback = {
         "last_call_date": today,
-        "call_transcript_summary": (existing_notes + auto_note).strip()[:99000],
+        "call_transcript_summary": append_notes(existing_notes, auto_note),
     }
 
-    # Status is deliberately conservative. We only move a lead off "New",
-    # and only to "Contacted" — meaning "a human was reached, outcome
-    # unknown." Guessing a richer status (Rejected, Opt Out) from a
-    # duration and an AI summary risks writing something wrong into the
-    # record that drives future dialing decisions. A human reviewing
-    # "Contacted + auto-logged" can tell what happened; a wrongly-set
-    # "Rejected" quietly kills a live lead.
-    current_status = fields.get("status")
-    if current_status in ("New", None):
+    # Status is deliberately conservative: only ever move "New" ->
+    # "Contacted", meaning "a human was reached, outcome unknown". Guessing
+    # a richer status from a duration and an AI summary risks writing
+    # something wrong into the record that drives future dialling. A human
+    # reading "Contacted + auto-logged" can tell what happened; a wrongly
+    # inferred "Rejected" quietly kills a live lead, and a missed "Opt Out"
+    # leaves someone who asked to be removed looking dialable.
+    if fields.get("status") in ("New", None):
         fallback["status"] = "Contacted"
 
     try:
         upsert_lead(address, fallback)
-        print(f"  AUTO-LOGGED unlogged call for {address} "
-              f"({duration}s, {ended_reason}) — agent never called log_call_outcome")
+        print(f"  AUTO-LOGGED unlogged call for {address} ({duration}s, {ended_reason})")
     except Exception as e:
         print(f"  FAILED to auto-log call for {address}: {e}")
         return {"received": True, "error": str(e)[:200]}
 
     return {"received": True, "logged_by_agent": False, "auto_logged": True}
-
-
-def _dispatch_and_record(address: str, lead_fields: dict, agreed_price: float):
-    """
-    Runs after the HTTP response has already gone back to Vapi — the call
-    keeps moving instead of sitting on a multi-second pause for docx
-    generation + SMTP login. Exceptions here can't be surfaced back to the
-    call anymore, so they're logged loudly and left visible on the record
-    for you to notice from the dashboard instead.
-    """
-    try:
-        dispatch_agreed_deal(lead_fields, agreed_price)
-        current_emails = lead_fields.get("#_emails", 0)
-        upsert_lead(address, {"#_emails": current_emails + 1})
-        print(f"Contract emailed successfully for {address}")
-    except Exception as e:
-        print(f"Contract dispatch FAILED for {address} (Agreed status still saved — handle manually): {e}")
-        try:
-            upsert_lead(address, {
-                "call_transcript_summary": (lead_fields.get("call_transcript_summary") or "")
-                + f"\n[Contract email failed to send: {e}]"
-            })
-        except Exception as inner_e:
-            print(f"Also failed to record the dispatch failure on the record: {inner_e}")
-
-
-@app.post("/flag_for_human_review")
-def flag_for_human_review(req: FlagReviewRequest, background_tasks: BackgroundTasks):
-    """
-    Called ONLY when a seller verbally agrees to a price. Marks the lead as
-    Agreed, then queues contract generation + emailing it to YOU (not the
-    seller) as a BACKGROUND task — this endpoint returns to Vapi immediately
-    rather than making the live call wait several seconds for a docx render
-    and an SMTP login. See deal_dispatch.py. This is the interim workflow
-    while Box Sign's paid tier is on hold: it does NOT send anything to the
-    seller itself. You still review the attached contract, add a signature
-    field, and send it on yourself.
-    """
-    fields = {
-        "status": "Agreed",
-        "offer_amount": req.agreed_price,
-        "call_transcript_summary": req.call_transcript_summary,
-        "last_call_date": __import__("datetime").date.today().isoformat(),
-    }
-    if req.email is not None:
-        fields["email"] = req.email
-    if req.repair_estimate is not None:
-        fields["repair_estimate"] = req.repair_estimate
-    if req.mao_floor is not None:
-        fields["mao_floor"] = req.mao_floor
-
-    # Same full-address-vs-street-only mismatch as log_call_outcome — resolve
-    # to the existing record's real stored address before writing, so this
-    # updates the real lead instead of creating a duplicate.
-    write_address = resolve_address_for_write(req.address)
-    result = upsert_lead(write_address, fields)
-
-    full_record = find_lead_record(write_address)
-    lead_fields = full_record["fields"] if full_record else {**fields, "address": write_address}
-    background_tasks.add_task(_dispatch_and_record, write_address, lead_fields, req.agreed_price)
-
-    return {
-        "success": True,
-        "airtable_record": result.get("id"),
-        "needs_human_review": True,
-        "contract_dispatch": "queued",
-    }

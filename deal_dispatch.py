@@ -1,56 +1,52 @@
 """
-Fires the moment a seller verbally agrees to a price. Generates the filled
-purchase agreement and emails it to YOU (the business owner) — not the
-seller — since Box Sign is on hold and adding real signature fields is
-still a manual step for now.
+Fires the moment a seller verbally agrees to a price: generates the filled
+purchase agreement and emails it to YOU (the business owner), not the
+seller, since Box Sign is on hold and adding real signature fields is still
+a manual step.
 
-Interim workflow this supports:
+Interim workflow:
   1. Seller agrees on a call -> flag_for_human_review is called
   2. This module generates the contract .docx and emails it to OWNER_EMAIL
-     along with a deal summary (seller contact info, agreed price, ARV,
-     repair estimate, call notes)
-  3. You open the email, review, add a signature field, and send it to the
-     seller yourself
-  4. Once this is proven out and worth the cost, swap this module's
-     "email the owner" step for box_sign.py's "send directly to seller for
-     e-signature" flow — build_deal_dict() below stays the same either way.
+     with a deal summary (seller contact info, agreed price, ARV, repair
+     estimate, call notes)
+  3. You review, add a signature field, and send it to the seller yourself
+  4. Once proven out and worth the cost, swap the "email the owner" step for
+     box_sign.py's "send directly to seller" flow — build_deal_dict() stays
+     the same either way.
 
-EMAIL TRANSPORT — CHANGED from smtplib to Resend's HTTPS API:
-Render's free-tier web services block ALL outbound SMTP ports (25, 465,
-587) as of Sept 2025 — confirmed via Render's own changelog. Every send
-was failing with [Errno 101] Network is unreachable, a low-level network
-block, not an auth or code problem. Port 443 (plain HTTPS) is NOT blocked,
-so Resend's API (or any transactional-email HTTP API) sidesteps it
-entirely. If you ever move off Render's free tier, this file doesn't need
-to change back — HTTPS works everywhere SMTP does, not the reverse.
+EMAIL TRANSPORT — Resend's HTTPS API, not smtplib.
+Render's free-tier services block ALL outbound SMTP ports (25, 465, 587)
+as of Sept 2025 — confirmed via Render's own changelog. Every send failed
+with [Errno 101] Network is unreachable, which is a network firewall, not
+an auth or code problem, and no smtplib change fixes it. Port 443 is not
+blocked. If you ever move off the free tier this file does not need to
+change back: HTTPS works everywhere SMTP does, not the reverse.
 
 SETUP:
-  RESEND_API_KEY    from https://resend.com/api-keys
-  OWNER_EMAIL       where the contract + deal summary should land
-  RESEND_FROM       the "from" address Resend sends as. On Resend's free
-                     tier with no verified domain, this MUST be exactly
-                     "onboarding@resend.dev" — trying to send from your own
-                     address without domain verification will fail. Once
-                     you verify a domain in Resend, you can use a real
-                     address here (e.g. deals@youracquisitions.com).
-                     Defaults to "onboarding@resend.dev" if unset.
+  RESEND_API_KEY   from https://resend.com/api-keys
+  OWNER_EMAIL      where the contract + deal summary should land
+  RESEND_FROM      the "from" address. On Resend's free tier with no
+                   verified domain this MUST be exactly
+                   "onboarding@resend.dev" (the default here).
 
-HONEST LIMITATION — Resend sandbox mode: until you verify a domain in
-Resend, their API will only deliver to the email address you signed up to
-Resend with. If OWNER_EMAIL doesn't match your Resend account's own email,
-sends will silently succeed at the API level but never arrive. Verify this
-by checking Resend's dashboard "Emails" log after your first test send —
-it'll show "delivered" or the actual rejection reason, which is more
-visibility than smtplib ever gave you.
+HONEST LIMITATION — Resend sandbox: until you verify a domain, Resend only
+delivers to the address the Resend account was registered with. If
+OWNER_EMAIL does not match it, sends succeed at the API level and never
+arrive. Check Resend's "Emails" log after the first test send.
 
-Optional, all have reasonable defaults:
-  BUYER_NAME, BUYER_PHONE, DEFAULT_TITLE_COMPANY,
-  ACCEPTANCE_WINDOW_DAYS (default 5), CLOSING_WINDOW_DAYS (default 30)
+HONEST LIMITATION: legal_description and title_company are not tracked in
+the Airtable schema, so they come through as explicit placeholders in the
+generated contract. You or your title company still fill those in before
+anything is signature-ready.
 
-HONEST LIMITATION: legal_description and title_company aren't tracked
-anywhere in your Airtable schema, so they come through as explicit
-placeholders in the generated contract — you (or your title company) still
-need to fill those in before anything is signature-ready.
+CHANGES IN THIS CLEANUP
+-----------------------
+- `send_owner_email()` is now public, so cron_evening_wrap.py and
+  cron_tool_health_check.py can use the same working transport instead of
+  their own smtplib block (which would fail on Render) or printing into
+  logs nobody reads.
+- Currency formatting is defensive: a value arriving as a string from
+  Airtable used to raise inside an f-string and take down the whole send.
 """
 
 import base64
@@ -72,22 +68,39 @@ DEFAULT_TITLE_COMPANY = os.environ.get("DEFAULT_TITLE_COMPANY", "TBD")
 ACCEPTANCE_WINDOW_DAYS = int(os.environ.get("ACCEPTANCE_WINDOW_DAYS", 5))
 CLOSING_WINDOW_DAYS = int(os.environ.get("CLOSING_WINDOW_DAYS", 30))
 
+# Resend rejects attachments above ~40MB; a filled purchase agreement is
+# tens of KB, so anything near this means something is wrong upstream.
+MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
+
 
 class EmailError(Exception):
-    """Raised when Resend's API rejects a send — kept as a plain exception,
-    same pattern as AirtableError, so callers can catch it specifically if
-    they ever want to (main.py currently just logs and moves on)."""
-    pass
+    """Raised when Resend rejects a send. A plain exception, same pattern as
+    AirtableError, so callers can catch it specifically."""
 
 
-def _send_via_resend(subject: str, body_text: str, attachment_path: str = None) -> None:
+def _money(value) -> str:
     """
-    Sends one email through Resend's HTTPS API. Raises EmailError on any
-    non-2xx response so the caller's existing try/except logging still
-    works exactly as before — only the transport underneath changed.
+    Formats a currency value for an email body, tolerating None, "" and
+    strings. `f"${value:,.0f}"` raises TypeError on a string, and that used
+    to abort the entire notification — losing the alert about a deal because
+    a number was stored as text.
+    """
+    if value in (None, ""):
+        return "-"
+    try:
+        return f"${float(value):,.0f}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def send_owner_email(subject: str, body_text: str, attachment_path: str = None) -> None:
+    """
+    Sends one email to OWNER_EMAIL through Resend's HTTPS API. Raises
+    EmailError on any non-2xx so the caller's logging still works — only the
+    transport underneath changed.
     """
     if not all([RESEND_API_KEY, OWNER_EMAIL]):
-        raise EmailError("RESEND_API_KEY or OWNER_EMAIL not set")
+        raise EmailError("RESEND_API_KEY or OWNER_EMAIL not set on this service/job")
 
     payload = {
         "from": RESEND_FROM,
@@ -97,6 +110,9 @@ def _send_via_resend(subject: str, body_text: str, attachment_path: str = None) 
     }
 
     if attachment_path:
+        size = os.path.getsize(attachment_path)
+        if size > MAX_ATTACHMENT_BYTES:
+            raise EmailError(f"Attachment {attachment_path} is {size} bytes — too large to send")
         with open(attachment_path, "rb") as f:
             encoded = base64.b64encode(f.read()).decode("ascii")
         payload["attachments"] = [{
@@ -110,21 +126,23 @@ def _send_via_resend(subject: str, body_text: str, attachment_path: str = None) 
     }
     response = requests.post(RESEND_URL, headers=headers, json=payload, timeout=20)
     if not response.ok:
-        raise EmailError(f"Resend API error ({response.status_code}): {response.text}")
+        raise EmailError(f"Resend API error ({response.status_code}): {response.text[:400]}")
 
 
 def _build_full_address(lead_fields: dict) -> str:
     """
     Combines address + city + state + zip into one mailing address for the
-    contract, if city/zip are available. Falls back gracefully to just
-    address + state for records saved before those columns existed — this
-    still produces a valid (if less complete) contract rather than erroring.
+    contract. Falls back to address + state for records saved before those
+    columns existed — still a valid, if less complete, contract rather than
+    an error.
     """
     parts = [lead_fields.get("address") or "[ADDRESS MISSING]"]
     city = lead_fields.get("city")
     state = lead_fields.get("state")
     zip_code = lead_fields.get("zip")
-    city_state_zip = ", ".join(p for p in [city, " ".join(p2 for p2 in [state, zip_code] if p2)] if p)
+    city_state_zip = ", ".join(
+        p for p in [city, " ".join(p2 for p2 in [state, zip_code] if p2)] if p
+    )
     if city_state_zip:
         parts.append(city_state_zip)
     return ", ".join(parts)
@@ -140,7 +158,7 @@ def build_deal_dict(lead_fields: dict, agreed_price: float) -> dict:
         "buyer_name": BUYER_NAME,
         "subject_property": _build_full_address(lead_fields),
         "legal_description": "To be confirmed by title company prior to closing",
-        "purchase_price": f"${agreed_price:,.0f}",
+        "purchase_price": _money(agreed_price),
         "acceptance_deadline": (today + timedelta(days=ACCEPTANCE_WINDOW_DAYS)).strftime("%B %d, %Y"),
         "closing_date": (today + timedelta(days=CLOSING_WINDOW_DAYS)).strftime("%B %d, %Y"),
         "title_company": DEFAULT_TITLE_COMPANY,
@@ -152,34 +170,30 @@ def build_deal_dict(lead_fields: dict, agreed_price: float) -> dict:
 
 
 def email_contract_to_owner(contract_path: str, lead_fields: dict, agreed_price: float) -> None:
-    """
-    Sends the generated contract to YOUR inbox (not the seller) via Resend,
-    with the deal's key facts in the body so you can review at a glance
-    before adding a signature field and sending it on yourself.
-    """
+    """Sends the generated contract to YOUR inbox with the deal's key facts
+    in the body, so you can review at a glance before adding a signature
+    field and sending it on."""
     address = lead_fields.get("address", "Unknown address")
     seller_email = lead_fields.get("email") or "NOT CAPTURED — get this before forwarding the contract"
-    arv = lead_fields.get("arv") or 0
-    repair_estimate = lead_fields.get("repair_estimate") or 0
 
     body = (
         f"A seller verbally agreed to a price during today's call. The filled "
-        f"contract is attached — this still needs your review, a signature "
-        f"field, and to be sent on to the seller yourself.\n\n"
+        f"contract is attached — it still needs your review, a signature field, "
+        f"and to be sent on to the seller yourself.\n\n"
         f"Address: {address}\n"
         f"Seller: {lead_fields.get('owner_name', 'Unknown')}\n"
         f"Seller phone: {lead_fields.get('phone', '-')}\n"
         f"Seller email: {seller_email}\n"
-        f"Agreed price: ${agreed_price:,.0f}\n"
-        f"ARV: ${arv:,.0f}\n"
-        f"Repair estimate: ${repair_estimate:,.0f}\n"
+        f"Agreed price: {_money(agreed_price)}\n"
+        f"ARV: {_money(lead_fields.get('arv'))}\n"
+        f"Repair estimate: {_money(lead_fields.get('repair_estimate'))}\n"
         f"Call notes: {lead_fields.get('call_transcript_summary', '')}\n\n"
-        f"Reminder: legal description and title company in the attached "
-        f"contract are placeholders, not real values yet — fill those in "
-        f"before sending it to the seller."
+        f"Reminder: the legal description and title company in the attached "
+        f"contract are placeholders, not real values — fill those in before "
+        f"sending it to the seller."
     )
 
-    _send_via_resend(
+    send_owner_email(
         subject=f"Contract ready for review — {address}",
         body_text=body,
         attachment_path=contract_path,
@@ -188,20 +202,14 @@ def email_contract_to_owner(contract_path: str, lead_fields: dict, agreed_price:
 
 def notify_attention_needed(lead_fields: dict, status: str) -> None:
     """
-    Fires for the three call outcomes that genuinely warrant your attention —
-    "Human Call" (seller asked for a person), "Offer Made" (a real number is
-    on the table, close to a deal), and "Priority Follow-up" (weak number
-    but a strong, specific reason to sell — worth handling personally rather
-    than letting the standard retry schedule handle it). Deliberately does
-    NOT fire for every outcome — a dead lead or a routine "check back later"
-    doesn't need to interrupt you, only ones that actually do.
+    Fires for the three call outcomes that genuinely warrant attention:
+    "Human Call" (the seller asked for a person), "Offer Made" (a real
+    number is on the table), and "Priority Follow-up" (a weak number but a
+    strong, specific reason to sell). Deliberately does NOT fire for every
+    outcome — a dead lead or a routine "check back later" should not
+    interrupt you.
     """
     address = lead_fields.get("address", "Unknown address")
-    arv = lead_fields.get("arv") or 0
-    offer_amount = lead_fields.get("offer_amount")
-    repair_estimate = lead_fields.get("repair_estimate") or 0
-    mao_floor = lead_fields.get("mao_floor")
-    next_contact_date = lead_fields.get("next_contact_date")
 
     subject_map = {
         "Human Call": f"Human callback requested — {address}",
@@ -220,18 +228,18 @@ def notify_attention_needed(lead_fields: dict, status: str) -> None:
         f"Address: {address}",
         f"Seller: {lead_fields.get('owner_name', 'Unknown')}",
         f"Phone: {lead_fields.get('phone', '-')}",
-        f"ARV: ${arv:,.0f}",
-        f"Repair estimate: ${repair_estimate:,.0f}",
+        f"ARV: {_money(lead_fields.get('arv'))}",
+        f"Repair estimate: {_money(lead_fields.get('repair_estimate'))}",
     ]
-    if offer_amount is not None:
-        body_lines.append(f"Seller's number / offer discussed: ${offer_amount:,.0f}")
-    if mao_floor is not None:
-        body_lines.append(f"Your ceiling (mao_floor): ${mao_floor:,.0f}")
-    if next_contact_date:
-        body_lines.append(f"Scheduled next contact: {next_contact_date}")
+    if lead_fields.get("offer_amount") is not None:
+        body_lines.append(f"Seller's number / offer discussed: {_money(lead_fields.get('offer_amount'))}")
+    if lead_fields.get("mao_floor") is not None:
+        body_lines.append(f"Your ceiling (mao_floor): {_money(lead_fields.get('mao_floor'))}")
+    if lead_fields.get("next_contact_date"):
+        body_lines.append(f"Scheduled next contact: {lead_fields.get('next_contact_date')}")
     body_lines.append(f"Notes: {lead_fields.get('call_transcript_summary', '')}")
 
-    _send_via_resend(
+    send_owner_email(
         subject=subject_map.get(status, f"Lead needs attention — {address}"),
         body_text="\n".join(body_lines),
     )
@@ -240,13 +248,14 @@ def notify_attention_needed(lead_fields: dict, status: str) -> None:
 def dispatch_agreed_deal(lead_fields: dict, agreed_price: float) -> dict:
     """
     The one function to call the moment a deal is agreed: builds the
-    contract, generates the .docx, and emails it to you for review.
-    Raises on failure rather than swallowing errors — the caller (main.py)
-    decides how to handle that without losing the "Agreed" status that was
-    already saved to Airtable.
+    contract, generates the .docx, and emails it for review. Raises on
+    failure rather than swallowing errors — the caller decides how to handle
+    that without losing the "Agreed" status already saved to Airtable.
     """
     deal = build_deal_dict(lead_fields, agreed_price)
-    address_slug = "".join(c if c.isalnum() else "_" for c in (lead_fields.get("address") or "contract"))[:50]
+    address_slug = "".join(
+        c if c.isalnum() else "_" for c in (lead_fields.get("address") or "contract")
+    )[:50]
     output_path = f"/tmp/contract_{address_slug}.docx"
     contract_path = generate_contract(deal, output_path)
     email_contract_to_owner(contract_path, lead_fields, agreed_price)

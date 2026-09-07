@@ -1,7 +1,30 @@
-fastapi
-uvicorn
-requests
-pydantic
-anthropic
-docxtpl
-python-multipart
+# Version-pinned deliberately.
+#
+# This was unpinned. A free-tier Render service redeploys on every push and
+# reinstalls from scratch, so an upstream release the same afternoon can
+# break the live call path with no code change on your side and no obvious
+# cause. Bump these on purpose, not by accident.
+#
+# To update: change a pin, deploy, confirm /  returns healthy and one test
+# call completes, then move on. Never bump several at once.
+
+fastapi==0.115.6
+uvicorn==0.34.0
+requests==2.32.3
+pydantic==2.10.4
+anthropic==0.42.0
+docxtpl==0.19.0
+python-docx==1.1.2
+
+# REQUIRED for zoneinfo. Python's ZoneInfo reads the system tz database,
+# which slim/alpine base images do not ship. Without this,
+# ZoneInfo("America/Monterrey") raises ZoneInfoNotFoundError at import of
+# mello_time — and ZoneInfo("America/Chicago") raises inside
+# is_within_calling_hours(), which is what decides whether it is legal to
+# dial someone right now.
+tzdata==2024.2
+
+# NOTE: python-multipart was removed. It was only needed by the
+# /inbound_email and /inbound_sms endpoints, which parsed a form payload,
+# printed a line and discarded it — both were TODO stubs and have been
+# deleted. Add it back if you build those integrations for real.
