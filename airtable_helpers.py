@@ -80,6 +80,53 @@ def find_lead_flexible(address: str) -> Optional[dict]:
     return None
 
 
+def find_lead_by_phone(phone: str) -> Optional[dict]:
+    """
+    Finds a lead by phone number, tolerating format mismatches.
+
+    Why this is needed: Vapi reports the customer number in E.164
+    ("+15125551234"), but lead_sourcing.py saved whatever format BatchData
+    returned — which may be "(512) 555-1234", "512-555-1234", or
+    "5125551234". An exact-string match therefore fails on every real call,
+    which is why the end-of-call webhook could never find its lead.
+
+    Airtable's formula language can't strip punctuation from a stored field,
+    so instead of normalizing the column we generate the plausible written
+    formats of the SAME number and match any of them. Cheap, and it works
+    without a schema migration.
+    """
+    if not phone:
+        return None
+
+    digits = "".join(c for c in phone if c.isdigit())
+    if not digits:
+        return None
+    last10 = digits[-10:]
+    if len(last10) < 10:
+        return None
+
+    area, prefix, line = last10[0:3], last10[3:6], last10[6:10]
+    variants = {
+        phone,
+        last10,
+        f"+1{last10}",
+        f"1{last10}",
+        f"({area}) {prefix}-{line}",
+        f"({area}){prefix}-{line}",
+        f"{area}-{prefix}-{line}",
+        f"{area}.{prefix}.{line}",
+        f"{area} {prefix} {line}",
+        f"+1 ({area}) {prefix}-{line}",
+    }
+
+    clauses = ", ".join(f"{{phone}}='{_escape_formula_value(v)}'" for v in variants)
+    try:
+        matches = query_leads(f"OR({clauses})", max_records=1)
+        return matches[0] if matches else None
+    except AirtableError:
+        return None
+
+
 def resolve_address_for_write(address: str) -> str:
     """
     Returns the address string an upsert_lead() call should actually use, so

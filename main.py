@@ -37,8 +37,9 @@ from rentcast_lookup import (
 from zillapi_lookup import get_zillow_valuation, extract_zestimate
 from dashboard import router as dashboard_router
 from airtable_helpers import (
-    find_lead_record, find_lead_flexible, resolve_address_for_write,
-    upsert_lead, query_leads, AirtableError, increment_daily_log_field,
+    find_lead_record, find_lead_flexible, find_lead_by_phone,
+    resolve_address_for_write, upsert_lead, query_leads, AirtableError,
+    increment_daily_log_field,
 )
 from deal_dispatch import dispatch_agreed_deal, notify_attention_needed
 
@@ -374,29 +375,73 @@ async def vapi_call_ended(request: Request):
     if not phone:
         return {"received": True, "warning": "no phone number in payload"}
 
-    # find_lead_record() filters by the "address" field, so it can never
-    # match a phone number — this webhook needs a phone-based lookup instead.
-    # Escape any single quotes so a stray character can't break the Airtable
-    # formula (matches the same precaution used elsewhere on user-supplied data).
+    # Phone formats never match exactly — Vapi sends E.164, Airtable stores
+    # whatever BatchData returned. find_lead_by_phone() tries the plausible
+    # written variants of the same number instead of one exact string.
+    record = find_lead_by_phone(phone)
+    if not record:
+        print(f"  No Airtable lead matches {phone} — nothing to record against.")
+        return {"received": True, "warning": "no matching lead"}
+
+    fields = record["fields"]
+    address = fields.get("address")
+    today = __import__("datetime").date.today().isoformat()
+
+    # THE GUARANTEE: log_call_outcome is called BY THE MODEL, so it can
+    # silently never happen — the seller hangs up, the agent ends the call
+    # for abuse, the tool 422s, the model just forgets. This webhook fires
+    # from Vapi's side regardless, so it is the backstop that ensures no
+    # connected call ever goes unrecorded.
+    #
+    # Detection: log_call_outcome always stamps last_call_date with today.
+    # If that stamp is missing, the model's own logging did not happen and
+    # we fill in what we can from Vapi's report.
+    already_logged = fields.get("last_call_date") == today
+
+    if already_logged:
+        # The agent logged it properly. Don't overwrite its richer notes —
+        # just attach Vapi's summary and call metadata alongside them.
+        existing_notes = fields.get("call_transcript_summary") or ""
+        addition = f" [Call: {duration}s, ended: {ended_reason}]"
+        if ai_summary and ai_summary not in existing_notes:
+            addition = f" [Call: {duration}s, ended: {ended_reason}. Vapi summary: {ai_summary}]"
+        try:
+            upsert_lead(address, {"call_transcript_summary": (existing_notes + addition)[:99000]})
+            print(f"  Appended call metadata to already-logged lead {address}")
+        except Exception as e:
+            print(f"  Could not append call metadata for {address}: {e}")
+        return {"received": True, "logged_by_agent": True}
+
+    # The agent did NOT log this call. Record it ourselves.
+    fallback = {
+        "last_call_date": today,
+        "call_transcript_summary": (
+            f"[AUTO-LOGGED by end-of-call webhook — the agent did not call "
+            f"log_call_outcome for this call.] Duration: {duration}s. "
+            f"Ended: {ended_reason}. Vapi summary: {ai_summary or 'none available'}"
+        ),
+    }
+
+    # Status is deliberately conservative. We only move a lead off "New",
+    # and only to "Contacted" — meaning "a human was reached, outcome
+    # unknown." Guessing a richer status (Rejected, Opt Out) from a
+    # duration and an AI summary risks writing something wrong into the
+    # record that drives future dialing decisions. A human reviewing
+    # "Contacted + auto-logged" can tell what happened; a wrongly-set
+    # "Rejected" quietly kills a live lead.
+    current_status = fields.get("status")
+    if current_status in ("New", None):
+        fallback["status"] = "Contacted"
+
     try:
-        safe_phone = phone.replace("'", "\\'")
-        matches = query_leads(f"{{phone}}='{safe_phone}'", max_records=1)
-        record = matches[0] if matches else None
-    except Exception:
-        record = None
+        upsert_lead(address, fallback)
+        print(f"  AUTO-LOGGED unlogged call for {address} "
+              f"({duration}s, {ended_reason}) — agent never called log_call_outcome")
+    except Exception as e:
+        print(f"  FAILED to auto-log call for {address}: {e}")
+        return {"received": True, "error": str(e)[:200]}
 
-    SHORT_CALL_THRESHOLD_SECONDS = 15
-    if duration is not None and duration < SHORT_CALL_THRESHOLD_SECONDS and record:
-        current_status = record["fields"].get("status")
-        if current_status in ("New", "Contacted", None):
-            note = f"Short call ({duration}s, ended: {ended_reason}). AI summary: {ai_summary}"
-            print(f"  Flagging as short/low-engagement call: {note}")
-            # Logged as a note, not an automatic status change — a human
-            # glance at "short call, no engagement" is safer than the
-            # system unilaterally deciding this lead is dead from one
-            # data point alone.
-
-    return {"received": True}
+    return {"received": True, "logged_by_agent": False, "auto_logged": True}
 
 
 def _dispatch_and_record(address: str, lead_fields: dict, agreed_price: float):
