@@ -117,14 +117,33 @@ def reconcile(call: dict) -> str:
     # the retry cadence is correct without this — writing a "call happened"
     # note for a voicemail or a no-answer just adds noise to the record and
     # can make a lead look contacted when nobody ever picked up.
+    #
+    # Matched as SUBSTRINGS, not exact values: Vapi prefixes some reasons
+    # with a phase, e.g. the real string observed in testing was
+    # "call.in-progress.error-assistant-did-not-receive-customer-audio",
+    # not the bare "assistant-did-not-receive-customer-audio". An equality
+    # check silently misses those and backfills a call nobody answered.
     ended_reason = call.get("endedReason", "unknown")
     duration = call_duration(call)
-    NOT_CONNECTED = {
-        "customer-did-not-answer", "customer-busy", "no-answer", "voicemail",
-        "twilio-failed-to-connect", "customer-did-not-give-microphone-permission",
-        "assistant-did-not-receive-customer-audio",
-    }
-    if ended_reason in NOT_CONNECTED or (duration is not None and duration < 10):
+    NOT_CONNECTED_FRAGMENTS = (
+        "did-not-answer",
+        "customer-busy",
+        "no-answer",
+        "voicemail",
+        "failed-to-connect",
+        "did-not-receive-customer-audio",
+        "did-not-give-microphone-permission",
+        "pipeline-error",
+        "twilio-failed",
+    )
+    reason_lower = ended_reason.lower()
+    never_connected = any(frag in reason_lower for frag in NOT_CONNECTED_FRAGMENTS)
+
+    # Duration threshold stays deliberately low. A genuine "take me off your
+    # list" can be over in 12 seconds, and that is exactly the call that
+    # MUST be recorded — so short calls are only skipped when the ended
+    # reason also says nobody was there.
+    if never_connected or (duration is not None and duration < 8):
         return "not_connected"
 
     record = find_lead_by_phone(phone)
