@@ -5,8 +5,29 @@
 # break the live call path with no code change on your side and no obvious
 # cause. Bump these on purpose, not by accident.
 #
-# To update: change a pin, deploy, confirm /  returns healthy and one test
+# To update: change a pin, deploy, confirm / returns healthy and one test
 # call completes, then move on. Never bump several at once.
+#
+# *** THESE PINS REQUIRE THE PYTHON VERSION IN .python-version ***
+#
+# Render defaults to the newest Python it supports, which was 3.14.3 on the
+# first deploy of this file. pydantic-core (the only compiled dependency
+# here) had no prebuilt wheel for 3.14, so pip fell back to building it from
+# Rust source — and Render's build image mounts the cargo registry
+# read-only, so that build can NEVER succeed:
+#
+#   error: failed to create directory `/usr/local/cargo/registry/cache/...`
+#   Caused by: Read-only file system (os error 30)
+#   💥 maturin failed
+#
+# The `.python-version` file at the repo root pins 3.12.8, which has
+# prebuilt wheels for every pin below. Do not delete it. If you ever move to
+# a newer Python, bump pydantic FIRST and confirm a wheel exists for that
+# interpreter — a missing wheel here does not degrade gracefully, it fails
+# the whole build.
+#
+# The same applies to every cron job: they share this repo, so they share
+# .python-version, and all of them would have hit the identical failure.
 
 fastapi==0.115.6
 uvicorn==0.34.0

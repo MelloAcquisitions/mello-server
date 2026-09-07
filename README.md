@@ -40,6 +40,25 @@ tools/dump_tools.py        raw Vapi assistant + tool config. Start here for conf
 tools/bump_max_tokens.py   set maxTokens=500 on the three tools
 ```
 
+## Do not delete `.python-version`
+
+It pins **3.12.8**. Render otherwise defaults to the newest Python it
+supports, and on the first deploy of the pinned requirements that was 3.14.3
+— for which `pydantic-core` had no prebuilt wheel. pip fell back to
+compiling it from Rust source, and Render's build image mounts the cargo
+registry read-only, so that build can never succeed:
+
+```
+error: failed to create directory `/usr/local/cargo/registry/cache/...`
+Caused by: Read-only file system (os error 30)
+💥 maturin failed
+```
+
+Every cron job shares this repo and therefore this file, so all of them
+would have hit the identical failure. If you ever move to a newer Python,
+bump `pydantic` first and confirm a wheel exists for that interpreter — a
+missing wheel here doesn't degrade, it fails the whole build.
+
 ## Two things that cost this project weeks
 
 **The Render hostname includes a random suffix.** It is
