@@ -79,9 +79,15 @@ for tid in tool_ids:
     if tool.get("async"):
         print("!! async=true — Vapi does not wait for the response and marks the "
               "call successful immediately.")
-    if not (tool.get("function") or {}).get("maxTokens"):
-        print("!! no maxTokens — Vapi defaults to 100 (~75 words), which truncates "
-              "long arguments like call notes. Run tools/bump_max_tokens.py --apply.")
+    # maxTokens only governs the ARGUMENTS a model generates for a tool call.
+    # A built-in endCall/transferCall tool takes no arguments, so warning about
+    # it is noise — and worse, it points at bump_max_tokens.py, which only
+    # targets the three custom tools and would do nothing here.
+    if tool.get("type") not in ("endCall", "transferCall", "dtmf") \
+            and not (tool.get("function") or {}).get("maxTokens"):
+        print("!! no maxTokens — Vapi defaults to 100 (~75 words), which "
+              "truncates longer arguments like call notes. Run "
+              "tools/bump_max_tokens.py --apply.")
     for noise in ("createdAt", "updatedAt", "orgId", "id"):
         tool.pop(noise, None)
     print(json.dumps(tool, indent=2, default=str))

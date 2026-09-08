@@ -6,3 +6,4 @@ venv/
 .env
 generated_contract.docx
 test_box_contract.docx
+run_checks.sh
