@@ -50,10 +50,17 @@ from airtable_helpers import find_lead_record, query_leads, upsert_lead  # noqa:
 RENDER_BASE_URL = (os.environ.get("RENDER_BASE_URL") or "").rstrip("/")
 MELLO_TOOL_SECRET = os.environ.get("MELLO_TOOL_SECRET")
 
-REQUIRED_VARS = [
-    "AIRTABLE_API_KEY", "AIRTABLE_BASE_ID", "AIRTABLE_TABLE_NAME",
-    "RESEND_API_KEY", "OWNER_EMAIL", "BUYER_NAME",
-]
+# Vars THIS SCRIPT needs to do its job. Missing one is a real failure.
+REQUIRED_VARS = ["AIRTABLE_API_KEY", "AIRTABLE_BASE_ID", "AIRTABLE_TABLE_NAME"]
+
+# Vars only the SERVER needs. This script never uses them, and there is no
+# reason for them to be on your laptop — contract emails are sent by Render,
+# not by you. These were previously reported as FAIL, which meant a healthy
+# run always ended "2 failed". A check that always fails is a check you stop
+# reading, and then a real failure slips past in the same list. Reported as
+# informational now; the server is the only place they matter.
+SERVER_ONLY_VARS = ["RESEND_API_KEY", "OWNER_EMAIL", "BUYER_NAME",
+                    "DEFAULT_TITLE_COMPANY", "DASHBOARD_PASSWORD"]
 
 passed, failed = [], []
 
@@ -87,9 +94,28 @@ def step_env():
     ok(f"RENDER_BASE_URL = {RENDER_BASE_URL}")
     for var in REQUIRED_VARS:
         ok(f"{var} is set") if os.environ.get(var) else \
-            bad(f"{var} is MISSING locally (check it is on the Render web service too)")
+            bad(f"{var} is MISSING — this script cannot read Airtable without it")
+
+    absent = [v for v in SERVER_ONLY_VARS if not os.environ.get(v)]
+    if absent:
+        print(f"  NOTE  not set locally, and do not need to be — these are used by "
+              f"the Render web service only: {', '.join(absent)}")
     if MELLO_TOOL_SECRET:
-        ok("MELLO_TOOL_SECRET is set — auth will be exercised")
+        # Print a fingerprint, never the secret. The exact-match comparison on the
+        # server gives no clue WHY a token was rejected, and the difference is
+        # almost always invisible — a stray quote Render stored literally, or a
+        # trailing newline from a paste. Length plus a hash prefix makes both
+        # visible without putting the secret in your scrollback or screenshots.
+        import hashlib
+        digest = hashlib.sha256(MELLO_TOOL_SECRET.encode()).hexdigest()[:12]
+        ok(f"MELLO_TOOL_SECRET is set — {len(MELLO_TOOL_SECRET)} chars, "
+           f"fingerprint {digest}")
+        if MELLO_TOOL_SECRET != MELLO_TOOL_SECRET.strip():
+            bad("MELLO_TOOL_SECRET has leading or trailing whitespace — that alone "
+                "will fail the comparison. Re-export it without the stray space.")
+        if MELLO_TOOL_SECRET[:1] in ("'", '"') or MELLO_TOOL_SECRET[-1:] in ("'", '"'):
+            bad("MELLO_TOOL_SECRET starts or ends with a quote character. The quotes "
+                "are part of the value, not shell syntax — remove them.")
     else:
         print("  NOTE  MELLO_TOOL_SECRET not set locally. If the server has one, "
               "every check below will 401.")
@@ -124,8 +150,16 @@ def step_calculate_mao():
     print("\n[3] calculate_mao")
     r = post_tool("/calculate_mao", {"arv": 250000, "repair_cost": 15000})
     if r.status_code == 401:
-        return bad("401 — the server has MELLO_TOOL_SECRET set and this run's token "
-                   "doesn't match. Vapi's tools need the same X-Mello-Token header.")
+        return bad(
+            "401 — THIS IS A LOCAL vs RENDER MISMATCH, NOT A VAPI PROBLEM. Vapi is "
+            "not involved in this check at all; the token this script sent does not "
+            "equal MELLO_TOOL_SECRET on the server. The comparison is exact, so the "
+            "difference is usually invisible: a value pasted into Render wrapped in "
+            "quotes (Render stores them literally), or a trailing space or newline. "
+            "Compare the fingerprint printed in section [1] against the value you "
+            "pasted into Render, then re-add it there without quotes. If you JUST "
+            "changed it on Render, wait for the redeploy to finish first."
+        )
     if r.status_code != 200:
         return bad(f"HTTP {r.status_code} — Vapi ignores anything that isn't 2xx. {r.text[:200]}")
     data = r.json()

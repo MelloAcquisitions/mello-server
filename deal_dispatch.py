@@ -129,6 +129,36 @@ def send_owner_email(subject: str, body_text: str, attachment_path: str = None) 
         raise EmailError(f"Resend API error ({response.status_code}): {response.text[:400]}")
 
 
+# Contracts read "the laws of the State of ___". Airtable stores the two-letter
+# code, so this rendered as "the State of TX" — correct data, but it reads as a
+# mail-merge slip on a document a seller is asked to sign. Falls back to
+# whatever is stored if the code is unrecognised, so a new market never blocks
+# a contract.
+STATE_NAMES = {
+    "AL": "Alabama", "AK": "Alaska", "AZ": "Arizona", "AR": "Arkansas",
+    "CA": "California", "CO": "Colorado", "CT": "Connecticut", "DE": "Delaware",
+    "FL": "Florida", "GA": "Georgia", "HI": "Hawaii", "ID": "Idaho",
+    "IL": "Illinois", "IN": "Indiana", "IA": "Iowa", "KS": "Kansas",
+    "KY": "Kentucky", "LA": "Louisiana", "ME": "Maine", "MD": "Maryland",
+    "MA": "Massachusetts", "MI": "Michigan", "MN": "Minnesota",
+    "MS": "Mississippi", "MO": "Missouri", "MT": "Montana", "NE": "Nebraska",
+    "NV": "Nevada", "NH": "New Hampshire", "NJ": "New Jersey",
+    "NM": "New Mexico", "NY": "New York", "NC": "North Carolina",
+    "ND": "North Dakota", "OH": "Ohio", "OK": "Oklahoma", "OR": "Oregon",
+    "PA": "Pennsylvania", "RI": "Rhode Island", "SC": "South Carolina",
+    "SD": "South Dakota", "TN": "Tennessee", "TX": "Texas", "UT": "Utah",
+    "VT": "Vermont", "VA": "Virginia", "WA": "Washington",
+    "WV": "West Virginia", "WI": "Wisconsin", "WY": "Wyoming",
+    "DC": "District of Columbia",
+}
+
+
+def _state_name(code) -> str:
+    if not code:
+        return "[STATE MISSING]"
+    return STATE_NAMES.get(str(code).strip().upper(), str(code))
+
+
 def _build_full_address(lead_fields: dict) -> str:
     """
     Combines address + city + state + zip into one mailing address for the
@@ -163,7 +193,7 @@ def build_deal_dict(lead_fields: dict, agreed_price: float) -> dict:
         "closing_date": (today + timedelta(days=CLOSING_WINDOW_DAYS)).strftime("%B %d, %Y"),
         "title_company": DEFAULT_TITLE_COMPANY,
         "other_agreements": "None",
-        "governing_state": lead_fields.get("state") or "[STATE MISSING]",
+        "governing_state": _state_name(lead_fields.get("state")),
         "seller_phone": lead_fields.get("phone") or "",
         "buyer_phone": BUYER_PHONE,
     }
