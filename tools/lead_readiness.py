@@ -29,7 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from airtable_helpers import normalize_phone, query_leads, require_config  # noqa: E402
 from orchestrator_lib import (  # noqa: E402
-    STATE_TIMEZONES, is_lead_exhausted, is_retry_due, is_within_calling_hours,
+    _normalize_state, is_lead_exhausted, is_retry_due, is_within_calling_hours,
 )
 
 # The exact statuses cron_dispatch_calls.py considers workable.
@@ -78,9 +78,11 @@ def main():
         print(f"  {field:14s} {have:5d}/{total} have it  ({pct(have, total):>4s}){flag}")
 
     # Unknown state codes fail the calling-hours lookup and are never dialled.
+    # Uses the same normalizer the dispatch cron uses, so this report can
+    # never disagree with what will actually happen at dial time.
     bad_states = Counter(
-        (r["fields"].get("state") or "").upper() for r in leads
-        if r["fields"].get("state") and (r["fields"]["state"]).upper() not in STATE_TIMEZONES
+        r["fields"]["state"] for r in leads
+        if r["fields"].get("state") and not _normalize_state(r["fields"]["state"])
     )
     if bad_states:
         print(f"\n  UNRECOGNISED state codes (these leads can NEVER be called — "

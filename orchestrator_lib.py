@@ -195,10 +195,46 @@ STATE_TIMEZONES = {
 }
 
 
+# Accept a full state name as well as a code. Airtable may hold either —
+# whoever fills a row by hand naturally types "Texas", BatchData returns a
+# code, and a lead whose state does not resolve is silently NEVER CALLED:
+# is_within_calling_hours fails safe, the dispatch cron skips it, and nothing
+# anywhere reports why. Costing a real lead over "Texas" vs "TX" is not a
+# trade worth making.
+_STATE_NAME_TO_CODE = {
+    "alabama": "AL", "alaska": "AK", "arizona": "AZ", "arkansas": "AR",
+    "california": "CA", "colorado": "CO", "connecticut": "CT", "delaware": "DE",
+    "florida": "FL", "georgia": "GA", "hawaii": "HI", "idaho": "ID",
+    "illinois": "IL", "indiana": "IN", "iowa": "IA", "kansas": "KS",
+    "kentucky": "KY", "louisiana": "LA", "maine": "ME", "maryland": "MD",
+    "massachusetts": "MA", "michigan": "MI", "minnesota": "MN",
+    "mississippi": "MS", "missouri": "MO", "montana": "MT", "nebraska": "NE",
+    "nevada": "NV", "new hampshire": "NH", "new jersey": "NJ",
+    "new mexico": "NM", "new york": "NY", "north carolina": "NC",
+    "north dakota": "ND", "ohio": "OH", "oklahoma": "OK", "oregon": "OR",
+    "pennsylvania": "PA", "rhode island": "RI", "south carolina": "SC",
+    "south dakota": "SD", "tennessee": "TN", "texas": "TX", "utah": "UT",
+    "vermont": "VT", "virginia": "VA", "washington": "WA",
+    "west virginia": "WV", "wisconsin": "WI", "wyoming": "WY",
+    "district of columbia": "DC", "washington dc": "DC", "washington d.c.": "DC",
+}
+
+
+def _normalize_state(state: str) -> str:
+    """'TX', 'tx', ' Texas ', 'texas' -> 'TX'. Returns '' if unresolvable."""
+    if not state:
+        return ""
+    cleaned = str(state).strip()
+    if cleaned.upper() in STATE_TIMEZONES:
+        return cleaned.upper()
+    return _STATE_NAME_TO_CODE.get(cleaned.lower(), "")
+
+
 def get_lead_local_hour(state: str) -> int:
-    tz_name = STATE_TIMEZONES.get((state or "").upper())
+    code = _normalize_state(state)
+    tz_name = STATE_TIMEZONES.get(code)
     if not tz_name:
-        raise ValueError(f"Unknown state code: {state!r}. Cannot determine calling window safely.")
+        raise ValueError(f"Unknown state: {state!r}. Cannot determine calling window safely.")
     return datetime.now(ZoneInfo(tz_name)).hour
 
 
