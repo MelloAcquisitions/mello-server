@@ -56,7 +56,7 @@ class AirtableError(Exception):
         super().__init__(f"Airtable error ({status_code}): {detail}")
 
 
-def require_config(*extra_vars: str) -> None:
+def require_config(*extra_vars: str, include_airtable: bool = True) -> None:
     """
     Fail fast and readably if required environment variables are missing.
 
@@ -65,8 +65,14 @@ def require_config(*extra_vars: str) -> None:
     full set — and forgetting one previously produced a 404 against a URL
     containing the literal string "None", which reads like an Airtable
     problem instead of a config problem.
+
+    include_airtable=False for a job that genuinely never touches Airtable
+    (cron_tool_health_check reads Vapi and emails via Resend, nothing else).
+    Demanding credentials a job does not use is not "extra safety" — it
+    spreads a database key onto services with no reason to hold one, and it
+    fails the job for the wrong reason.
     """
-    required = ["AIRTABLE_API_KEY", "AIRTABLE_BASE_ID"] + list(extra_vars)
+    required = (["AIRTABLE_API_KEY", "AIRTABLE_BASE_ID"] if include_airtable else []) + list(extra_vars)
     missing = [v for v in required if not os.environ.get(v)]
     if missing:
         raise RuntimeError(

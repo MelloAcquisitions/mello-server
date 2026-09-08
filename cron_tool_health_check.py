@@ -98,8 +98,12 @@ def build_alert_body(failures_by_tool: dict, call_count: int) -> str:
 
 
 def main():
+    # No Airtable here: this job reads Vapi and emails via Resend. It does
+    # require the Resend vars though — an alerting job that cannot deliver
+    # its alert is worse than no job at all, because it looks healthy.
     from airtable_helpers import require_config
-    require_config("VAPI_API_KEY", "VAPI_ASSISTANT_ID")
+    require_config("VAPI_API_KEY", "VAPI_ASSISTANT_ID",
+                   "RESEND_API_KEY", "OWNER_EMAIL", include_airtable=False)
 
     print("Checking today's calls for tool failures...")
     calls = list_calls(created_at_ge=start_of_today_utc_iso())
