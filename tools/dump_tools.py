@@ -62,6 +62,58 @@ if not assistant.get("analysisPlan"):
     print("!! No analysisPlan — analysis.summary stays empty, and BOTH fallback "
           "logging layers read that field.")
 
+# ---------------------------------------------------------------------------
+# SPEECH TIMING — where "the agent talked over me / went silent" actually lives
+#
+# The first live test call died here, not in the tool path. The agent's
+# opening ran ~13 seconds; the seller spoke at second 16 while it was still
+# talking; that audio went nowhere; then 18 seconds of dead air. Measured
+# LLM latency was 659ms the whole time, so the latency dashboard looked
+# perfectly healthy while the call was unusable.
+#
+# stopSpeakingPlan  = how easily a human can INTERRUPT the agent.
+#   numWords: 0 means barge-in on any sound. Higher = the seller has to keep
+#   talking over the agent before it yields. If this is high and your opening
+#   is long, an interruption is simply discarded.
+# startSpeakingPlan = how long the agent waits before it starts talking.
+#   waitSeconds too high reads as lag; too low and it steps on the seller.
+# silenceTimeoutSeconds = how long dead air runs before Vapi kills the call.
+# ---------------------------------------------------------------------------
+print("=" * 70)
+print("SPEECH TIMING / INTERRUPTION")
+print("=" * 70)
+_timing = {
+    "firstMessage": assistant.get("firstMessage"),
+    "firstMessageMode": assistant.get("firstMessageMode"),
+    "silenceTimeoutSeconds": assistant.get("silenceTimeoutSeconds"),
+    "maxDurationSeconds": assistant.get("maxDurationSeconds"),
+    "responseDelaySeconds": assistant.get("responseDelaySeconds"),
+    "backchannelingEnabled": assistant.get("backchannelingEnabled"),
+    "backgroundSound": assistant.get("backgroundSound"),
+    "startSpeakingPlan": assistant.get("startSpeakingPlan"),
+    "stopSpeakingPlan": assistant.get("stopSpeakingPlan"),
+    "voice": {k: v for k, v in (assistant.get("voice") or {}).items()
+              if k in ("provider", "voiceId", "model", "speed", "stability")},
+}
+print(json.dumps(_timing, indent=2, default=str))
+
+_stop = assistant.get("stopSpeakingPlan") or {}
+if not _stop:
+    print("\n!! No stopSpeakingPlan set — Vapi uses its defaults. If sellers report "
+          "being talked over, set numWords: 0 so any sound interrupts the agent.")
+elif (_stop.get("numWords") or 0) > 0:
+    print(f"\n!! stopSpeakingPlan.numWords = {_stop.get('numWords')} — the seller must "
+          f"say that many words BEFORE the agent stops talking. Combined with a long "
+          f"opening line, a short interruption ('Hello?') is discarded entirely. "
+          f"Consider numWords: 0.")
+
+_fm = assistant.get("firstMessage") or ""
+if len(_fm.split()) > 12:
+    print(f"\n!! firstMessage is {len(_fm.split())} words. The opening should be one "
+          f"short question — long openings are what sellers talk over.")
+
+print()
+
 tool_ids = (assistant.get("model") or {}).get("toolIds") or []
 print(f"\n{len(tool_ids)} tool(s) attached\n")
 
