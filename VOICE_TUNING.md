@@ -32,13 +32,25 @@ Silence is the safer default. Revisit once the rest is solid.
 
 ```
 startSpeakingPlan:
-  waitSeconds: 0.8                    # default is ~0.4
-  smartEndpointingEnabled: true       # or the provider Vapi currently offers
+  waitSeconds: 0.4                    # REVISED DOWN from 0.8 — see below
+  smartEndpointingEnabled: true
   transcriptionEndpointingPlan:
-    onPunctuationSeconds: 0.3
-    onNoPunctuationSeconds: 1.2       # a sentence with no clear end
-    onNumberSeconds: 0.6              # people pause mid-number: "two... thirty"
+    onPunctuationSeconds: 0.1
+    onNoPunctuationSeconds: 1.0       # a sentence with no clear end
+    onNumberSeconds: 0.5              # people pause mid-number: "two... thirty"
 ```
+
+**Revised from an earlier 0.8.** That version optimised only for "never talk
+over the seller," and the cost of it is an agent that feels laggy on every
+single turn — which matters more, because it happens constantly while
+interruptions happen occasionally.
+
+Smart endpointing is what lets you have both. It predicts whether a sentence
+is semantically FINISHED rather than timing silence, so a low wait stops
+being reckless. "I was thinking maybe..." and "I was thinking maybe two
+thirty" have identical trailing silence and are not the same turn. **If smart
+endpointing is NOT available on your plan, go back to 0.8** — without it, a
+0.4 wait will interrupt people.
 
 `waitSeconds` is how long the agent waits after the seller stops before it
 starts. Too low and it jumps on every breath. 0.8 feels attentive rather
@@ -114,6 +126,20 @@ hears the second one.
 | `maxDurationSeconds` | 600 | A stuck call should not bill for an hour. |
 
 ---
+
+## Just run the script
+
+`tools/tune_voice.py` applies everything above through the Vapi API, one
+setting group at a time, reading each back to confirm it persisted:
+
+```bash
+set -a; . ./.env; set +a
+python3 tools/tune_voice.py            # show current vs recommended
+python3 tools/tune_voice.py --apply
+```
+
+It deliberately does NOT touch the voice itself. That is a listening
+decision, not a config one.
 
 ## How to actually test this
 
