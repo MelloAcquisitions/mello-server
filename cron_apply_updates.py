@@ -132,6 +132,16 @@ def apply_prompt_update(proposed_change: str, record_id: str):
     if not current_prompt.strip():
         raise RuntimeError("The system prompt came back empty — aborting to avoid wiping it.")
 
+    # IDEMPOTENCY GUARD. If this exact change is already in the live prompt,
+    # it was applied on a previous run and the status write is what failed.
+    # Re-appending would duplicate the paragraph, and it would keep doing so
+    # every night. Skip the patch and go straight to marking it applied.
+    if proposed_change.strip() and proposed_change.strip() in current_prompt:
+        print("  This change is ALREADY in the live system prompt — not appending "
+              "it again. (If this keeps happening, the proposal is not being "
+              "marked Applied; see the note in mark_applied.)")
+        return
+
     snapshot_previous_prompt(record_id, current_prompt)
 
     new_prompt = current_prompt + "\n\n" + proposed_change
@@ -166,13 +176,21 @@ def mark_applied(record_id: str):
         timeout=15,
     )
     if not response.ok:
-        # This matters more than it looks: a proposal stuck on "Approved"
-        # permanently blocks every future nightly draft, silently.
+        # This matters more than it looks. A proposal stuck on "Approved":
+        #   1. blocks every future nightly draft, silently, forever
+        #   2. gets re-applied tomorrow, appending the same paragraph again
+        # The idempotency guard above now prevents (2), but (1) still needs a
+        # human. The usual cause is that the status field has no "Applied"
+        # option — Airtable rejects a single-select value that is not a
+        # defined choice.
         raise RuntimeError(
             f"Prompt WAS updated, but marking the proposal Applied failed "
-            f"({response.status_code}: {response.text[:200]}). Set its status to "
-            f"'Applied' by hand — while it sits on 'Approved' no new improvement "
-            f"drafts will be generated, AND it may be re-applied tomorrow."
+            f"({response.status_code}: {response.text[:200]}).\n"
+            f"  MOST LIKELY CAUSE: the '{PROPOSED_UPDATES_TABLE}' status field has no "
+            f"'Applied' option. Airtable rejects a single-select value that is not "
+            f"a defined choice. Add 'Applied' as an option on that field.\n"
+            f"  Until then: set this proposal's status by hand, or no new "
+            f"improvement drafts will ever be generated."
         )
 
 

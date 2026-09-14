@@ -378,6 +378,12 @@ def get_todays_call_count() -> int:
     return int(get_daily_log_value("calls_today", 0))
 
 
+class DailyLogFieldMissing(Exception):
+    """The Daily Log table has no column by that name. Cost/usage tracking is
+    a nice-to-have; sourcing leads is the business. Never let the first kill
+    the second."""
+
+
 def increment_daily_log_field(field_name: str, by: float = 1):
     """
     Adds `by` to a running daily total on today's Daily Log row, creating
@@ -387,23 +393,39 @@ def increment_daily_log_field(field_name: str, by: float = 1):
     duration-based Vapi cost estimate rather than a flat per-call guess),
     and the BatchData usage counters.
     """
-    record = _todays_daily_log_record()
+    try:
+        record = _todays_daily_log_record()
 
-    if record:
-        current = record["fields"].get(field_name, 0) or 0
-        _request(
-            "PATCH",
-            f"{DAILY_LOG_URL}/{record['id']}",
-            context=f"daily log write ({field_name})",
-            json={"fields": {field_name: current + by}},
-        )
-    else:
-        _request(
-            "POST",
-            DAILY_LOG_URL,
-            context=f"daily log create ({field_name})",
-            json={"fields": {"date": today_iso(), field_name: by}},
-        )
+        if record:
+            current = record["fields"].get(field_name, 0) or 0
+            _request(
+                "PATCH",
+                f"{DAILY_LOG_URL}/{record['id']}",
+                context=f"daily log write ({field_name})",
+                json={"fields": {field_name: current + by}},
+            )
+        else:
+            _request(
+                "POST",
+                DAILY_LOG_URL,
+                context=f"daily log create ({field_name})",
+                json={"fields": {"date": today_iso(), field_name: by}},
+            )
+    except AirtableError as e:
+        # A column that does not exist on the Daily Log table returns 422
+        # UNKNOWN_FIELD_NAME. That used to propagate into the caller — and in
+        # cron_morning_lead_prep the increment sits inside the per-lead try,
+        # so a missing tracking column made EVERY lead fail to save. Sourcing
+        # would run, spend BatchData credits, and write nothing, reporting
+        # only "FAILED to process" per lead.
+        #
+        # Usage tracking is not worth that. Warn loudly and carry on.
+        if "UNKNOWN_FIELD_NAME" in str(e.detail) or e.status_code == 422:
+            print(f"  WARNING: Daily Log has no '{field_name}' column, so that "
+                  f"counter is not being tracked. Add it as a Number field to "
+                  f"restore cost tracking. Continuing without it.")
+            return
+        raise
 
 
 def increment_todays_call_count(by: int = 1):
