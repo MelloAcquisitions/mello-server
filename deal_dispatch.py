@@ -51,11 +51,12 @@ CHANGES IN THIS CLEANUP
 
 import base64
 import os
-from datetime import date, timedelta
+from datetime import timedelta
 
 import requests
 
 from contract_generator import generate_contract
+from mello_time import today_local
 
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY")
 RESEND_FROM = os.environ.get("RESEND_FROM", "onboarding@resend.dev")
@@ -207,9 +208,20 @@ def _build_full_address(lead_fields: dict) -> str:
 
 
 def build_deal_dict(lead_fields: dict, agreed_price: float) -> dict:
-    """Maps an Airtable lead record + the agreed price into the contract
-    template's merge fields."""
-    today = date.today()
+    """
+    Maps an Airtable lead record + the agreed price into the contract
+    template's merge fields.
+
+    Dates come from today_local(), NOT date.today(). Render runs UTC; a deal
+    agreed at 7 PM Monterrey would have been stamped with TOMORROW's date —
+    on a contract, and on both the acceptance deadline and the closing date.
+    A legal document dated a day in the future, with deadlines shifted to
+    match, is the kind of error a title company catches and a seller loses
+    confidence over. This was missed in the original timezone sweep because
+    the sweep looked at the call pipeline, and this file is the one that
+    produces a document.
+    """
+    today = today_local()
     return {
         "contract_date": today.strftime("%B %d, %Y"),
         "seller_name": lead_fields.get("owner_name") or "[SELLER NAME MISSING]",

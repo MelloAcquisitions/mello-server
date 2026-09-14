@@ -135,10 +135,21 @@ def main():
         )
         full_property_address = f"{address}, {city_state_zip}" if city_state_zip else f"{address}, {state}"
 
+        # Airtable currency fields come back as floats, so str() yields
+        # "250000.0". That string is handed to the agent as {{recommended_arv}}
+        # and goes straight into both its speech and its calculate_mao call —
+        # a trailing ".0" is not something a person says about a house price.
+        raw_arv = fields.get("arv")
+        try:
+            arv_for_agent = str(int(round(float(raw_arv))))
+        except (TypeError, ValueError):
+            print(f"  Skipping {address} — ARV {raw_arv!r} is not a usable number")
+            continue
+
         call_context = {
             "seller_name": fields.get("owner_name") or "there",
             "property_address": full_property_address,
-            "recommended_arv": str(fields.get("arv")),
+            "recommended_arv": arv_for_agent,
         }
 
         try:
