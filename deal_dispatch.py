@@ -93,6 +93,34 @@ def _money(value) -> str:
         return str(value)
 
 
+def _latest_note(notes: str, max_chars: int = 900) -> str:
+    """
+    The most recent call note, not the entire history.
+
+    call_transcript_summary accumulates one entry per call, and the reconcile
+    cron appends an 800-character transcript excerpt to each. After three
+    calls the field is a wall of text, and the contract email — the one email
+    that has to be readable, because you act on it — was dumping all of it
+    inline. The detail is still on the Airtable record where it belongs.
+
+    Entries are separated by a blank line and each begins with a "[" marker,
+    so the last such block is the newest call.
+    """
+    notes = (notes or "").strip()
+    if not notes:
+        return "(none recorded)"
+
+    blocks = [b.strip() for b in notes.split("\n\n") if b.strip()]
+    latest = blocks[-1] if blocks else notes
+    older = len(blocks) - 1
+
+    if len(latest) > max_chars:
+        latest = latest[:max_chars].rstrip() + " […truncated]"
+    if older > 0:
+        latest += f"\n  ({older} earlier call note(s) on the Airtable record.)"
+    return latest
+
+
 def send_owner_email(subject: str, body_text: str, attachment_path: str = None) -> None:
     """
     Sends one email to OWNER_EMAIL through Resend's HTTPS API. Raises
@@ -195,7 +223,7 @@ def build_deal_dict(lead_fields: dict, agreed_price: float) -> dict:
         "other_agreements": "None",
         "governing_state": _state_name(lead_fields.get("state")),
         "seller_phone": lead_fields.get("phone") or "",
-        "buyer_phone": BUYER_PHONE,
+        "buyer_phone": BUYER_PHONE or "[BUYER PHONE MISSING — set BUYER_PHONE]",
     }
 
 
@@ -217,7 +245,7 @@ def email_contract_to_owner(contract_path: str, lead_fields: dict, agreed_price:
         f"Agreed price: {_money(agreed_price)}\n"
         f"ARV: {_money(lead_fields.get('arv'))}\n"
         f"Repair estimate: {_money(lead_fields.get('repair_estimate'))}\n"
-        f"Call notes: {lead_fields.get('call_transcript_summary', '')}\n\n"
+        f"Latest call notes:\n{_latest_note(lead_fields.get('call_transcript_summary'))}\n\n"
         f"Reminder: the legal description and title company in the attached "
         f"contract are placeholders, not real values — fill those in before "
         f"sending it to the seller."
@@ -267,7 +295,7 @@ def notify_attention_needed(lead_fields: dict, status: str) -> None:
         body_lines.append(f"Your ceiling (mao_floor): {_money(lead_fields.get('mao_floor'))}")
     if lead_fields.get("next_contact_date"):
         body_lines.append(f"Scheduled next contact: {lead_fields.get('next_contact_date')}")
-    body_lines.append(f"Notes: {lead_fields.get('call_transcript_summary', '')}")
+    body_lines.append(f"Latest call notes:\n{_latest_note(lead_fields.get('call_transcript_summary'))}")
 
     send_owner_email(
         subject=subject_map.get(status, f"Lead needs attention — {address}"),
