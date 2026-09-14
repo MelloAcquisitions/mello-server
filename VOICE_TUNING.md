@@ -53,17 +53,14 @@ endpointing is NOT available on your plan, go back to 0.8** — without it, a
 0.4 wait will interrupt people.
 
 `waitSeconds` is how long the agent waits after the seller stops before it
-starts. Too low and it jumps on every breath. 0.8 feels attentive rather
-than eager, and costs you almost nothing — your measured turn latency was
-1.68s, so this puts you around 2.1s, still well inside natural range.
+starts. It is charged on EVERY turn, so it is the setting the seller feels
+most. Your measured turn latency was 1.68s; at 0.4 you stay near that, at
+0.8 you add half a second to every exchange in the call.
 
-`onNoPunctuationSeconds` matters most. When someone trails off — "I mean,
-the roof, it's… " — that has no terminal punctuation, and a short timeout
-makes the agent leap in. Give it over a second.
-
-`smartEndpointingEnabled` predicts whether a sentence is actually finished
-rather than just timing the silence. If Vapi offers it, use it — it is worth
-more than any of the numbers above.
+`onNoPunctuationSeconds` is the one that saves you. When someone trails off —
+"I mean, the roof, it's… " — there is no terminal punctuation, and a short
+timeout makes the agent leap in. Keep it at a full second even while the
+main wait is low; the two are independent.
 
 ### 3. The seller must be able to interrupt the agent
 
@@ -120,7 +117,7 @@ hears the second one.
 | Setting | Try | Why |
 |---|---|---|
 | `model.temperature` | 0.7–0.8 | 0.6 produces same-y phrasing. Higher varies wording, which is most of what "sounds scripted" means. Watch that it doesn't drift off-script. |
-| `responseDelaySeconds` | 0.1–0.3 | An instant reply is uncanny — humans take a beat. Small, but real. |
+| `responseDelaySeconds` | **0** | Set to 0 by `tune_voice.py`. A padded delay is added latency on every turn, and it does not buy naturalness — the beat a human takes is variable and thinking-shaped, not a fixed pause. Endpointing and short turns are what make it feel human. |
 | `backgroundSound` | test both | Faint office noise reads as a real person at a desk to some ears and as a fake call center to others. Try it on yourself over a phone. |
 | `firstMessage` | keep it tiny | "Hey, is this {{seller_name}}?" and nothing else. |
 | `maxDurationSeconds` | 600 | A stuck call should not bill for an hour. |
