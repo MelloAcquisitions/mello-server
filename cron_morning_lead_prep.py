@@ -15,13 +15,12 @@ CHANGES IN THIS CLEANUP
    for someone previously marked Opt Out means putting them straight back
    into the dial queue. The phone number is the stronger key and catches
    exactly that case.
-2. A HARD ENRICHMENT BUDGET. Each lead costs 2 RentCast requests (AVM +
-   sold comps) and 1 Zillapi request. RentCast's free tier is 50 requests
-   PER MONTH. At the previous target of 15 leads/day that is 30 requests a
-   day — the entire month's allowance gone in under two days, after which
-   every enrichment fails and leads pile up unvalued with no obvious cause.
-   MAX_ENRICHMENTS_PER_DAY now caps it, shared with
-   cron_continuous_enrichment.py through the Daily Log table.
+2. A DAILY ENRICHMENT BUDGET. Each lead costs 2 RentCast requests (AVM +
+   sold comps) and 1 Zillapi request. This is a SPEND GUARD, not a quota
+   workaround — RentCast is pay-as-you-go, so the risk is not running out
+   mid-month, it is a stuck address or a loop quietly running up a bill.
+   Shared with cron_continuous_enrichment.py through the Daily Log table so
+   the two jobs cannot each spend a full budget in the same day.
 3. Leads missing city/state/zip are skipped rather than sent to RentCast as
    "6506 Clubway Ln, None, None None", which burns a request to get nothing.
 4. `except (AirtableError, Exception)` reduced to `except Exception` — the
@@ -54,10 +53,10 @@ MAX_ARV = int(os.environ.get("MAX_ARV", 650000))
 
 TARGET_NEW_LEADS = int(os.environ.get("TARGET_NEW_LEADS", 15))
 
-# Shared with cron_continuous_enrichment.py via the Daily Log table. See
-# the cost note in the module docstring — on RentCast's free tier (50/month)
-# this needs to be about 1, not 15. Raise it once you are on a paid plan.
-MAX_ENRICHMENTS_PER_DAY = int(os.environ.get("MAX_ENRICHMENTS_PER_DAY", 15))
+# Shared with cron_continuous_enrichment.py via the Daily Log table. A spend
+# guard, not a quota: set it a little above the leads you intend to source
+# daily, so a stuck address or a bug cannot run up an unbounded bill.
+MAX_ENRICHMENTS_PER_DAY = int(os.environ.get("MAX_ENRICHMENTS_PER_DAY", 25))
 ENRICHMENT_COUNTER = "enrichments_today"
 
 

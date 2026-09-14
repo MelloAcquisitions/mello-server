@@ -15,8 +15,9 @@ enabling this job.
 CHANGES IN THIS CLEANUP
 -----------------------
 1. Shares the daily enrichment budget with cron_morning_lead_prep.py. This
-   job runs 26 times a day; combined with morning prep it could exhaust
-   RentCast's 50-request free MONTHLY tier in a single day.
+   job runs 26 times a day; without a shared cap the two could each spend a
+   full budget, and a handful of unvaluable addresses could be retried all
+   day at two paid requests each.
 2. The give-up path no longer overwrites call_transcript_summary — it
    appends. On a lead that had been called, that write was destroying the
    call history.
@@ -43,14 +44,14 @@ from orchestrator_lib import enrich_lead_with_valuation
 MIN_ARV = int(os.environ.get("MIN_ARV", 100000))
 MAX_ARV = int(os.environ.get("MAX_ARV", 650000))
 
-MAX_ENRICHMENTS_PER_DAY = int(os.environ.get("MAX_ENRICHMENTS_PER_DAY", 15))
+MAX_ENRICHMENTS_PER_DAY = int(os.environ.get("MAX_ENRICHMENTS_PER_DAY", 25))
 ENRICHMENT_COUNTER = "enrichments_today"
 
 # Hard cap on retry attempts per lead. Without it, a lead RentCast can never
 # value (bad address, no comps, no AVM data) is picked up EVERY 30 MINUTES
 # FOREVER — the query only excludes leads that already have an ARV, and a
 # lead that keeps failing never gets one. One or two stuck addresses can
-# burn a month's free-tier allowance in a day.
+# quietly run up a real bill on repeat lookups that can never succeed.
 MAX_ENRICHMENT_ATTEMPTS = int(os.environ.get("MAX_ENRICHMENT_ATTEMPTS", 3))
 
 

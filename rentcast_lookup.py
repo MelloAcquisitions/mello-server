@@ -6,13 +6,14 @@ SETUP:
 2. Set RENTCAST_API_KEY as an environment variable (never hardcode it).
 3. Run: python rentcast_lookup.py
 
-*** COST WARNING — READ THIS ***
-RentCast's FREE tier is 50 requests PER MONTH. One enriched lead costs TWO
-requests here (the AVM call plus the sold-comps call). At 15 leads a day
-that is 30 requests daily — the entire month's allowance gone in under two
-days, after which every enrichment fails and leads pile up unvalued. The
-enrichment crons now share a MAX_ENRICHMENTS_PER_DAY budget for exactly
-this reason; set it to about 1 while on the free tier.
+*** COST NOTE ***
+One enriched lead costs TWO requests here — the AVM call plus the sold-comps
+call. On pay-as-you-go that is a per-lead cost, not a monthly ceiling, so
+volume is a budget question rather than a hard wall.
+
+MAX_ENRICHMENTS_PER_DAY in the enrichment crons is the spend guard: it caps
+how much a runaway loop or a stuck address can cost in a day. Set it to
+roughly the number of leads you actually intend to source daily, not to 1.
 
 Uses /avm/value (confirmed at developers.rentcast.io/reference/value-estimate)
 for the AVM plus /properties with saleDateRange for real sold comps.

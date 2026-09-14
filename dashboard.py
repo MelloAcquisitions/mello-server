@@ -205,7 +205,9 @@ def get_costs_json(authorized: bool = Depends(check_password)):
         "Render (6 cron jobs, estimated)": 1.00,
         "Zillapi/Anthropic (light usage, estimated)": 5.00,
     }
-    UPCOMING_COSTS = {"RentCast (after upgrading from free tier)": 74.00}
+    # RentCast is pay-as-you-go: a per-request cost, not a subscription.
+    # Moving to a tier would make it cheaper per request, not newly payable.
+    UPCOMING_COSTS = {"RentCast (if moving from pay-as-you-go to a tier)": 0.00}
 
     try:
         daily_records = _fetch_paginated(DAILY_LOG_URL)
@@ -262,9 +264,9 @@ def get_costs_json(authorized: bool = Depends(check_password)):
             f"(${BATCHDATA_COST_PER_RECORD:.2f}/record, "
             f"${BATCHDATA_COST_PER_SKIPTRACE_MATCH:.2f}/match) are UNCALIBRATED placeholders. "
             f"Pull your real rates from BatchData's billing page and set "
-            f"BATCHDATA_COST_PER_RECORD / BATCHDATA_COST_PER_SKIPTRACE_MATCH. RentCast's "
-            f"free tier is 50 requests/MONTH and each enriched lead costs 2 — watch the "
-            f"'enrichments' number above."
+            f"BATCHDATA_COST_PER_RECORD / BATCHDATA_COST_PER_SKIPTRACE_MATCH. RentCast is "
+            f"pay-as-you-go and each enriched lead costs 2 requests — watch the "
+            f"'enrichments' number above to track that spend."
         ),
     }
 

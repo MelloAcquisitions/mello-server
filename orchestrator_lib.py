@@ -141,32 +141,86 @@ def is_retry_due(date_created: str, call_count: int, next_contact_date: str = No
 
 def enrich_lead_with_valuation(address: str, city: str, state: str, zip_code: str) -> dict:
     """
-    Runs the full RentCast + Zillow analysis for one lead.
+    Values one lead from whichever sources are actually available.
 
-    COST WARNING: one call to this function is 2 RentCast requests (AVM +
-    sold comps) and 1 Zillapi request. RentCast's free tier is 50
-    requests/month total. See the note in cron_morning_lead_prep.py — at 15
-    leads a day this exhausts the free tier in under two days.
+    EITHER PROVIDER MAY BE DOWN AND THIS STILL WORKS. Previously only Zillow
+    was optional: any RentCast failure raised and killed the whole enrichment,
+    so a provider outage or one malformed address took the entire sourcing run
+    with it. Now each source is independently optional and the result reports
+    which ones actually answered.
+
+    A one-source valuation is worse data and the result says so
+    (`single_source`), but a lead with a provisional ARV beats no lead.
+
+    COST: 2 RentCast requests (AVM + sold comps) + 1 Zillapi request per call.
+    RentCast is pay-as-you-go here, so this is a per-lead cost and not a
+    monthly ceiling. Zillapi is the one with a fixed free allowance.
+
+    Raises only when NO source produced a usable number — the caller's retry
+    and give-up logic then applies as normal.
     """
     if not (address and state):
-        raise ValueError(f"Cannot value a property without at least address and state (got {address!r}, {state!r})")
+        raise ValueError(
+            f"Cannot value a property without at least address and state "
+            f"(got {address!r}, {state!r})"
+        )
 
-    full_address = ", ".join(p for p in [address, city, " ".join(x for x in [state, zip_code] if x)] if p)
+    full_address = ", ".join(
+        p for p in [address, city, " ".join(x for x in [state, zip_code] if x)] if p
+    )
 
-    avm_result = get_property_valuation(full_address)
-    subject = avm_result.get("subjectProperty", {})
-    sold_result = get_sold_comps(full_address, subject_property=subject)
-    sold_properties = sold_result if isinstance(sold_result, list) else sold_result.get("properties", [])
-    analysis = analyze_sold_comps(sold_properties, subject_property=subject)
+    # ---- RentCast: AVM + sold comps. Optional. --------------------------
+    avm_result, analysis = {}, analyze_sold_comps([])
+    rentcast_ok = False
+    try:
+        avm_result = get_property_valuation(full_address)
+        subject = avm_result.get("subjectProperty", {}) or {}
+        try:
+            sold_result = get_sold_comps(full_address, subject_property=subject)
+            sold_properties = (sold_result if isinstance(sold_result, list)
+                               else sold_result.get("properties", []))
+            analysis = analyze_sold_comps(sold_properties, subject_property=subject)
+        except Exception as e:
+            # The AVM worked but comps did not — keep the AVM rather than
+            # throwing away a request already paid for.
+            print(f"  RentCast sold-comps failed for {address}, using the AVM alone: {e}")
+        rentcast_ok = True
+    except Exception as e:
+        print(f"  RentCast unavailable for {address} ({e}) — falling back to "
+              f"Zillow only for this lead.")
 
+    # ---- Zillow: independent second opinion. Optional. ------------------
     zillow_estimate = None
     try:
-        zillow_result = get_zillow_valuation(full_address)
-        zillow_estimate = extract_zestimate(zillow_result)
+        zillow_estimate = extract_zestimate(get_zillow_valuation(full_address))
     except Exception as e:
-        print(f"Zillow lookup failed for {address}, proceeding without it: {e}")
+        print(f"  Zillow lookup failed for {address}, proceeding without it: {e}")
 
-    return get_recommended_arv(analysis, avm_result, zillow_estimate=zillow_estimate)
+    if not rentcast_ok and zillow_estimate is None:
+        raise RuntimeError(
+            "Both RentCast and Zillow failed for this address — no valuation "
+            "source produced a number."
+        )
+
+    result = get_recommended_arv(analysis, avm_result, zillow_estimate=zillow_estimate)
+
+    # Make the quality of the answer visible to the caller and to the record.
+    candidates = {k: v for k, v in (result.get("all_candidates") or {}).items() if v}
+    result["candidate_count"] = len(candidates)
+    result["single_source"] = len(candidates) <= 1
+    result["rentcast_used"] = rentcast_ok
+    result["zillow_used"] = zillow_estimate is not None
+
+    if result["single_source"] and result.get("recommended_arv"):
+        # Worth saying out loud. The whole point of reconciling three
+        # candidates is that one bad number cannot become the ARV. With a
+        # single candidate there is nothing to cross-check it against, and
+        # that ARV feeds straight into what a seller gets offered.
+        print(f"  WARNING: {address} valued from ONE source "
+              f"({result.get('source')}) at {result['recommended_arv']:,} — no "
+              f"cross-check. Treat this ARV as provisional.")
+
+    return result
 
 
 # Predominant timezone per US state. Border-state caveat stands: a lead in

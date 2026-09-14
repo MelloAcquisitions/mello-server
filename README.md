@@ -138,8 +138,9 @@ tool-health's alert)
 
 ## Cost ceilings worth knowing before you scale
 
-- **RentCast free tier: 50 requests per MONTH.** One enriched lead = 2
-  requests. `MAX_ENRICHMENTS_PER_DAY` should be **1** until you upgrade.
+- **RentCast: pay-as-you-go.** One enriched lead = 2 requests. Not a monthly
+  ceiling — `MAX_ENRICHMENTS_PER_DAY` is a spend guard against a runaway
+  loop, so set it near your intended daily sourcing volume.
 - **Zillapi free tier: 100 credits.** One per enriched lead.
 - **Resend sandbox:** with no verified domain, it only delivers to the address
   the Resend account was registered with. Sends "succeed" and never arrive.

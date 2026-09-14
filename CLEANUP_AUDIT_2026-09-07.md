@@ -35,7 +35,11 @@ If you read nothing else:
 
 And one that will bite you on day two rather than day one:
 
-6. **RentCast's free tier is 50 requests per _month_,** and one enriched lead
+6. **CORRECTED 2026-09-14 — this was wrong.** RentCast is on pay-as-you-go
+   for this account, so there is no monthly ceiling and this was never a
+   launch blocker. The daily enrichment budget still exists, but as a spend
+   guard against a runaway loop rather than a quota workaround. The original
+   finding, left for the record: ~~RentCast's free tier is 50 requests per _month_,~~ and one enriched lead
    costs two. At 15 leads/day that is the whole month gone in under two days,
    after which enrichment fails silently and leads pile up unvalued. There is
    now a shared daily budget — **set `MAX_ENRICHMENTS_PER_DAY=1` until you are
